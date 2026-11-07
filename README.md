@@ -20,5 +20,5 @@ Levels: RU, RC, RR, SER. Cases: dirty, nonrepeatable, phantom.
    Sleep offsets (S2 waits 2s, S1 holds 6s) enforce the order.
 
 ## Notes
-- At SERIALIZABLE the S2 write blocks until S1 ends (~4s wait in the log). That is expected, not a hang.
+- At SERIALIZABLE, S2's first statement after its sleep blocks until S1 ends (~4s wait in the log): the SELECT in dirty read, the UPDATE in non-repeatable read, the INSERT in phantom read. That is expected, not a hang.
 - Phantom at REPEATABLE READ: plain SELECT shows no phantom (snapshot); P3 (after UPDATE) does. Verdict "write-only".

@@ -1,6 +1,7 @@
 -- PHANTOM READ | Session 1 = READER   (run FIRST)
 USE stadvdb_ho3;
 SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET SQL_SAFE_UPDATES = 0;  -- Workbench: allow the non-key UPDATE below (else Error 1175)
 
 START TRANSACTION;                                                    -- t0
 SELECT 'P1' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 ORDER BY account_id;

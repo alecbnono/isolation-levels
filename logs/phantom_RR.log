@@ -3,6 +3,7 @@
 [t=  0.0s] S1: USE stadvdb_ho3  -> affected=0 (took 0.0s)
 [t=  0.0s] S2: SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ  -> affected=0 (took 0.0s)
 [t=  0.0s] S1: SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ  -> affected=0 (took 0.0s)
+[t=  0.0s] S1: SET SQL_SAFE_UPDATES = 0  -> affected=0 (took 0.0s)
 [t=  0.0s] S1: START TRANSACTION  -> affected=0 (took 0.0s)
 [t=  0.0s] S1: P1: [{'step': 'P1', 'account_id': 101, 'balance': 1000.0}, {'step': 'P1', 'account_id': 103, 'balance': 2500.0}]  (waited 0.0s)
 [t=  2.0s] S2: DO SLEEP(2)  -> affected=0 (took 2.0s)
