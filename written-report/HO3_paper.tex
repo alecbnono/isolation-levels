@@ -316,16 +316,37 @@ Under Strict 2PL, Session 1 only enters its Shrinking Phase upon issuing \texttt
 Session 2 is immediately granted the S-lock, logging an exact lock wait duration of 4.0s ($6.0\text{s} - 2.0\text{s}$). 
 An identical 4.0s block occurs in Case 8, where Session 1's S-lock blocks Session 2's X-lock update until Session 1 commits.
 
-\subsection{Explicit Locking Experiments Framework (Member 4)}
-To evaluate lock-based concurrency control as an alternative to elevating entire transaction isolation levels, four explicit locking configurations were tested using row-level locks:
+\subsection{Explicit Locking Experiments}
+To evaluate lock-based concurrency control as an alternative to elevating the isolation level of an entire transaction, four explicit locking configurations were tested. Each case keeps an isolation level at which the target anomaly can occur and adds an explicit lock. Three cases use row-level locking reads, and one uses a table-level lock:
 \begin{enumerate}
-    \item \textbf{Lock Case 1 (Preventing Dirty Reads under READ UNCOMMITTED):} Using \texttt{SELECT ... FOR UPDATE} or table locks.
-    \item \textbf{Lock Case 2 (Preventing Non-Repeatable Reads under READ COMMITTED):} Employing \texttt{SELECT ... FOR SHARE} or \texttt{FOR UPDATE} on single-row lookups.
-    \item \textbf{Lock Case 3 (Preventing Phantom Reads under READ COMMITTED / REPEATABLE READ):} Employing locking range reads (\texttt{SELECT ... FOR UPDATE WHERE balance >= 800.00}) to invoke explicit Next-Key locking.
-    \item \textbf{Lock Case 4 (Performance and Deadlock Benchmarks under Explicit Locking):} Measuring lock-wait latency, lock wait timeouts (\texttt{innodb\_lock\_wait\_timeout}), and throughput trade-offs across concurrent connections.
+    \item \textbf{Lock Case 1 (Preventing Dirty Reads under READ UNCOMMITTED):} Session 2 reads Account 101 using \texttt{SELECT ... FOR UPDATE}, so it must wait for Session 1's exclusive row lock instead of reading the uncommitted balance.
+    \item \textbf{Lock Case 2 (Preventing Non-Repeatable Reads under READ COMMITTED):} Session 1 reads Account 101 using \texttt{SELECT ... FOR SHARE}, holding a shared row lock that blocks Session 2's \texttt{UPDATE} until Session 1 commits.
+    \item \textbf{Lock Case 3 (Preventing Phantom Reads under REPEATABLE READ):} Session 1 performs a locking range read (\texttt{SELECT ... WHERE balance >= 800.00 FOR UPDATE}), which acquires next-key locks that block Session 2's \texttt{INSERT}.
+    \item \textbf{Lock Case 4 (Preventing Phantom Reads under READ COMMITTED):} Session 1 acquires a table-level lock using \texttt{LOCK TABLES accounts READ}, which blocks Session 2's \texttt{INSERT} until \texttt{UNLOCK TABLES}.
 \end{enumerate}
 
-%% [Member 4 Lock Experiment empirical data, charts, and metrics to be populated here]
+Table~\ref{tab:lock_matrix} summarizes the results. In all four cases, the anomaly observed at the corresponding baseline isolation level was prevented, at the cost of a 4.0s wait in Session 2.
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Explicit Locking Results on MySQL InnoDB}
+\label{tab:lock_matrix}
+\begin{tabularx}{\textwidth}{c l l l c X}
+\toprule
+\textbf{Case} & \textbf{Anomaly} & \textbf{Isolation Level} & \textbf{Explicit Lock} & \textbf{S2 Wait} & \textbf{Observed Result} \\
+\midrule
+1 & Dirty Read & READ UNCOMMITTED & \texttt{SELECT ... FOR UPDATE} & 4.0s & S2 reads \$1000.00 after S1's rollback at $t=6.0$s instead of the uncommitted \$700.00. \\
+2 & Non-Repeatable Read & READ COMMITTED & \texttt{SELECT ... FOR SHARE} & 4.0s & S1 reads \$1000.00 in both R1 and R2; S2's update commits \$1200.00 only after S1 commits. \\
+3 & Phantom Read & REPEATABLE READ & \texttt{SELECT ... FOR UPDATE} & 4.0s & P1 and P2 both return Accounts 101 and 103; Account 104 is inserted only after S1 commits. \\
+4 & Phantom Read & READ COMMITTED & \texttt{LOCK TABLES ... READ} & 4.0s & P1 and P2 both return Accounts 101 and 103; Account 104 is inserted only after \texttt{UNLOCK TABLES}. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+Supplementary runs clarified the scope of the two phantom-prevention methods. Because \texttt{balance} is not indexed, the locking read in Lock Case 3 scans the entire primary key and locks every row and gap, not only the range \texttt{balance >= 800.00}. An \texttt{INSERT} with a balance of \$100.00, outside the queried range, was likewise blocked for 4.0s; after an index was added on \texttt{balance}, that insert proceeded immediately while a \$1500.00 insert remained blocked. The same locking read did not prevent the phantom under READ COMMITTED, where InnoDB does not use gap locks for this search: the \texttt{INSERT} proceeded immediately and Account 104 appeared in P2.
+
+Lock Case 4 prevents this READ COMMITTED phantom at the coarser granularity of the whole table, so all concurrent writes to \texttt{accounts} are blocked while the lock is held. Its script deliberately omits \texttt{START TRANSACTION}, which implicitly releases table locks: when the statement was added after \texttt{LOCK TABLES}, the \texttt{INSERT} proceeded immediately and the phantom returned.
 
 %%
 %% --- Appendix ---

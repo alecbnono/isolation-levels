@@ -33,7 +33,7 @@ CASES = ["dirty", "nonrepeatable", "phantom"]
 LOCK_CASES = ["lock1", "lock2", "lock3", "lock4"]
 FILES = {"dirty": "dirty_read", "nonrepeatable": "nonrepeatable_read", "phantom": "phantom_read", 
          "lock1": "lock_case1", "lock2": "lock_case2", "lock3": "lock_case3", "lock4": "lock_case4"}
-LOCK_LEVEL = {"lock1": "RU", "lock2": "RC", "lock3": "RR", "lock4": "SER"}
+LOCK_LEVEL = {"lock1": "RU", "lock2": "RC", "lock3": "RR", "lock4": "RC"}
 
 
 # Expected outcome on InnoDB (True = anomaly visible)
@@ -46,7 +46,7 @@ EXPECTED = {
 }
 
 LOCK_EXPECTED = {"lock1": "PREVENTED (Blocked)", "lock2": "PREVENTED (Repeatable)",
-                 "lock3": "PREVENTED (Gap Locked)", "lock4": "TIMEOUT_CAPTURED (Error 1205)"}
+                 "lock3": "PREVENTED (Gap Locked)", "lock4": "PREVENTED (Table Locked)"}
 
 
 def split_statements(text):
@@ -128,7 +128,7 @@ def judge(case, results):
     ids = lambda x: [r["account_id"] for r in x] if x is not None else None
 
     # -- LOCKING EXPERIMENT EVALUATIONS --
-    if case in ("lock1", "lock2", "lock3") and any(k[1] == "error" for k in results):
+    if case in LOCK_CASES and any(k[1] == "error" for k in results):
         return "ERROR"
     if case == "lock1":
         r1 = g("S2", "R1")
@@ -140,8 +140,8 @@ def judge(case, results):
         p1, p2 = ids(g("S1", "P1")), ids(g("S1", "P2"))
         return "PREVENTED (Gap Locked)" if p1 is not None and p2 is not None and p1 == p2 else "ANOMALY (Phantom Insert)"
     if case == "lock4":
-        s2_err = results.get(("S2", "error"), "")
-        return "TIMEOUT_CAPTURED (Error 1205)" if "1205" in s2_err or "Lock wait timeout" in s2_err else "NO_TIMEOUT"
+        p1, p2 = ids(g("S1", "P1")), ids(g("S1", "P2"))
+        return "PREVENTED (Table Locked)" if p1 is not None and p2 is not None and p1 == p2 else "ANOMALY (Phantom Insert)"
 
     # -- BASE EXPERIMENT EVALUATION --
     if any(k[1] == "error" for k in results):

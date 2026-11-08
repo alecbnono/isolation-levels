@@ -1,15 +1,14 @@
--- LOCK TIMEOUT BENCHMARK utilizing SERIALIZABLE ISOLATION LEVEL
--- BASE CASE: N/A (Lock Contention Benchmark)
--- LOCK TIMEOUT | Session 2 = SHORT TIMEOUT CONTENDER   (open in connection 2, run SECOND)
--- Mechanism: Session Timeout Limiter (i.e. SET session innodb_lock_wait_timeout = 2)
--- Behavior: Waits 2 seconds for S1's lock, then fails cleanly with Error 1205.
+-- PREVENT PHANTOM READS utilizing READ COMMITTED ISOLATION LEVEL
+-- BASE CASE: phantom_read_s2.sql
+-- PHANTOM READ | Session 2 = INSERTER   (open in connection 2, run SECOND)
+-- Mechanism: Explicit Table Lock (i.e. LOCK TABLES accounts READ) [handled by S1]
+-- Behavior: INSERT blocks at t=2 because S1 holds a table-level READ lock on accounts.
 USE stadvdb_ho3;
-SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE;
--- Set session lock wait timeout to 2s (less than S1's 6s sleep)
-SET session innodb_lock_wait_timeout = 2;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
 
-DO SLEEP(1);                                                          -- t1: Executes while S1 holds lock
+DO SLEEP(2);                                                          -- t2: Attempts insert during S1's lock
 START TRANSACTION;
--- Waits 2 seconds for S1's lock, then fails with Error 1205
-SELECT 'Contending Read' AS step, balance FROM accounts WHERE account_id = 101 FOR UPDATE;
+-- Blocks at t2 until S1 runs UNLOCK TABLES at t6
+INSERT INTO accounts (account_id, customer_id, balance, status)
+VALUES (104, 4, 1500.00, 'ACTIVE');
 COMMIT;
