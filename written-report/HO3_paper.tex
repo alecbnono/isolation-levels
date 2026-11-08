@@ -280,6 +280,36 @@ The empirical execution results for all 12 baseline configurations are summarize
     \item \textbf{Phantom Read Workload (Cases 9--12):} Documented in Appendix Table~\ref{tab:app_phantom}, demonstrating the classic phantom anomaly in READ UNCOMMITTED and READ COMMITTED, the snapshot hiding and write-only phantom manifestation in REPEATABLE READ, and index gap lock prevention in SERIALIZABLE.
 \end{itemize}
 
+\subsubsection{Read View Mechanics: READ COMMITTED vs. REPEATABLE READ}
+The difference between READ COMMITTED and REPEATABLE READ for non-repeatable reads stems from allocation policies in Multi-Version Concurrency Control (MVCC) Read View.
+Under READ COMMITTED, InnoDB generates statement-level Read Views at the execution of each individual \texttt{SELECT}. 
+As session 2 updates to \$1200.00 at $t=2.0$s, Session 1's query at $t=6.0$s generates a 
+new Read View that incorporates this committed state, resulting in a non-repeatable read ($R_1 \ne R_2$). 
+In contrast, REPEATABLE READ establishes a single, transaction-level Read View upon the execution of a transaction's first read ($t=0.0$s), maintaining it until termination. 
+Even if Session 2 commits changes concurrently, Session 1's subsequent read traverses the undo log history
+to reconstruct the committed pre-image of \$1000.00, successfully preserving read repeatability.
+
+\subsubsection{The Phantom Phenomenon under REPEATABLE READ}
+The ``Write-Only Phantom'' under REPEATABLE READ highlights a distinction between InnoDB's MVCC Snapshot Reads and Current Reads. 
+According to ANSI SQL-92's specifications, REPEATABLE READ permits phantom rows on re-queries. 
+However, InnoDB mitigates standard read phantoms by utilizing consistent read snapshots; as observed in query $P_2$ at $t=6.0$s, Session 1's plain \texttt{SELECT} 
+continues to return only the original two accounts ([101, 103]), completely concealing Session 2's committed insert of Account 104. 
+However, when Session 1 subsequently executes a range modification (\texttt{UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00}), the database engine switches to a Current Read to ensure data integrity. 
+The \texttt{UPDATE} scans the current clustered index, matches the committed row 104, and updates it. 
+Crucially, this operation rewrites row 104's header metadata (\texttt{DB\_TRX\_ID}) with Session 1's own transaction ID. 
+Because MVCC rules dictate that a transaction can always observe its own writes, the subsequent query $P_3$ reveals Account 104 alongside accounts 101 and 103. 
+The phantom is therefore ``write-only'', as it cannot be triggered through non-locking reads alone but is unmasked once a transaction modifies a phantom record.
+
+\subsubsection{Strict Two-Phase Locking and Empirical Lock Contention}
+The 4.0-second execution delay observed in the SERIALIZABLE logs validates Strict Two-Phase Locking (SS2PL) and lock compatibility enforcement. 
+In SERIALIZABLE mode, as non-locking MVCC reads are disabled, all \texttt{SELECT} statements acquire Shared Locks (S-locks), while \texttt{UPDATE} statements acquire Exclusive Locks (X-locks). 
+In the Dirty Read experiment (Case 4), Session 1 enters its Growing Phase at $t=0.0$s by acquiring an X-lock on Account 101 and holds it across its 6-second sleep. 
+When Session 2 issues a read at $t=2.0$s requesting an S-lock, InnoDB blocks the request due to S/X lock conflict. 
+Under Strict 2PL, Session 1 only enters its Shrinking Phase upon issuing \texttt{ROLLBACK} at $t=6.0$s, releasing all acquired locks. 
+Session 2 is immediately granted the S-lock, logging an exact lock wait duration of 4.0s ($6.0\text{s} - 2.0\text{s}$). 
+An identical 4.0s block occurs in Case 8, where Session 1's S-lock blocks Session 2's X-lock update until Session 1 commits.
+emonstrating the classic phantom anomaly in READ UNCOMMITTED and READ COMMITTED, the snapshot hiding and write-only phantom manifestation in REPEATABLE READ, and index gap lock prevention in SERIALIZABLE.
+
 \subsection{Explicit Locking Experiments Framework (Member 4)}
 To evaluate lock-based concurrency control as an alternative to elevating entire transaction isolation levels, four explicit locking configurations were tested using row-level locks:
 \begin{enumerate}
