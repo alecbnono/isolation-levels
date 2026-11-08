@@ -8,6 +8,7 @@
 \usepackage{tikz}
 \usepackage{listings}
 \usepackage{xcolor} 
+\usepackage{tabularx}
 
 \AtBeginDocument{%
   \providecommand\BibTeX{{%
@@ -119,25 +120,37 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (account_id) REFERENCES accounts(account_id)
 ) ENGINE=InnoDB;
-\end{lstlisting}
+\end{lstlisting} 
 
 \subsection{Initial Seed Data}
-The environment was initialized with three core account entities to provide baseline states for concurrent query execution: 
+The environment was initialized with three core account entities to provide baseline states for concurrent query execution:
 
-\begin{lstlisting}[language=SQL, caption={DML Initial Data Seeding}]
-INSERT INTO accounts (account_id, customer_id, balance, status) VALUES
-(101, 1, 1000.00, 'ACTIVE'),
-(102, 2, 500.00,  'ACTIVE'),
-(103, 3, 2500.00, 'ACTIVE');
+\smallskip
 
-INSERT INTO transactions (account_id, type, amount) VALUES
-(101, 'DEPOSIT', 1000.00),
-(102, 'DEPOSIT', 500.00),
-(103, 'DEPOSIT', 2500.00);
-\end{lstlisting}
+\noindent\textbf{Accounts Initial State}
+\smallskip
+
+\noindent
+\begin{tabularx}{\columnwidth}{XXXX}
+101 & 1 & 1000.00 & ACTIVE \\
+102 & 2 & 500.00  & ACTIVE \\
+103 & 3 & 2500.00 & ACTIVE \\
+\end{tabularx}
+
+\vspace{0.4cm} 
+
+\noindent\textbf{Transactions Initial State}
+\smallskip
+
+\noindent
+\begin{tabularx}{\columnwidth}{XXX}
+101 & DEPOSIT & 1000.00 \\
+102 & DEPOSIT & 500.00  \\
+103 & DEPOSIT & 2500.00 \\
+\end{tabularx}
+\vspace{0.3cm}
 
 \section{Experiments}
-
 
 %%
 %% This local block overrides the missing file error and registers your specific citation keys.
