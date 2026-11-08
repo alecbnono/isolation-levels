@@ -67,7 +67,7 @@
   \country{Philippines}
 }
 
-\author{Alec Marx G. Nono}
+\author{Alec Marx Gabriel B. Nono}
 \email{alec\_nono@dlsu.edu.ph}
 \affiliation{%
   \institution{De La Salle University}
@@ -163,6 +163,9 @@ The transactional workloads were designed to isolate the three classical read ph
 \subsubsection{Dirty Read Workload}
 A transaction updates Account 101 without committing, while a concurrent transaction reads the uncommitted balance before a rollback occurs.
 
+\smallskip
+\noindent\textbf{Real-World Scenario.} Session 1 models a customer withdrawing \$300.00 at an ATM: the balance is debited first, but the machine then encounters a cash-dispensing fault, so the withdrawal is cancelled and rolled back. Session 2 models a bank teller checking the same customer's balance while the withdrawal is still in progress, as when assessing whether a large payment can be approved, and re-checking it moments later. If the teller sees \$700.00, the decision is based on a balance that never officially existed, since the customer's funds remained \$1000.00 throughout.
+
 \begin{lstlisting}[language=SQL, caption={Session 1 (Writer) Transaction for Dirty Read}]
 -- Session 1: Writer
 SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
@@ -188,6 +191,9 @@ COMMIT;
 \subsubsection{Non-Repeatable Read Workload}
 Session 1 performs an initial read on Account 101, pauses, and re-reads the row. Concurrently, Session 2 modifies and commits the balance during the pause.
 
+\smallskip
+\noindent\textbf{Real-World Scenario.} Session 1 models a statement-generation job that reads an account's balance for the summary section and reads it again when producing the closing total of the same document. Session 2 models a \$200.00 payroll deposit that is posted and committed between those two reads. Although the deposit is legitimate, a statement showing \$1000.00 in one section and \$1200.00 in another is internally inconsistent because a single unit of work observed two different committed values.
+
 \begin{lstlisting}[language=SQL, caption={Session 1 (Reader) Transaction for Non-Repeatable Read}]
 -- Session 1: Reader
 SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
@@ -210,6 +216,9 @@ SELECT 'W committed' AS step, balance FROM accounts WHERE account_id = 101;
 
 \subsubsection{Phantom Read Workload}
 Session 1 executes a range query on accounts with \texttt{balance >= 800.00}, pauses, and re-executes the query. Session 2 concurrently inserts a new qualifying row (Account 104 with balance \$1500.00). In Session 1, an update statement is also executed to evaluate InnoDB current-read behavior under REPEATABLE READ.
+
+\smallskip
+\noindent\textbf{Real-World Scenario.} Session 1 models a compliance audit that lists all accounts holding at least \$800.00, re-runs the listing to confirm it, and then flags every qualifying account for review. Session 2 models a branch opening a new account with an initial deposit of \$1500.00 while the audit is running. The new account may appear as an unexpected extra row between the two listings; under REPEATABLE READ, it can remain hidden from both listings yet still be flagged by the update, leaving the audit with a flagged account that it never listed.
 
 \begin{lstlisting}[language=SQL, caption={Session 1 (Reader) Transaction for Phantom Read}]
 -- Session 1: Reader
