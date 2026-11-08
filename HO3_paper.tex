@@ -9,6 +9,7 @@
 \usepackage{listings}
 \usepackage{xcolor} 
 \usepackage{tabularx}
+\usepackage{booktabs}
 
 \AtBeginDocument{%
   \providecommand\BibTeX{{%
@@ -151,6 +152,291 @@ The environment was initialized with three core account entities to provide base
 \vspace{0.3cm}
 
 \section{Experiments}
+
+To evaluate concurrency control across the four ANSI SQL-92 isolation levels (\textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, and \textbf{SERIALIZABLE}), a multi-session experimental framework was implemented. The test harness employs two concurrent database connections managed by a multithreaded Python harness with barrier synchronization (\texttt{threading.Barrier}), enforcing precise statement interleaving across dual sessions via controlled \texttt{DO SLEEP()} delays.
+
+A total of 12 baseline experiments ($4\text{ isolation levels} \times 3\text{ read anomalies}$) were systematically executed and logged. Prior to every individual test case, the database state was reset and re-seeded using automated DDL/DML scripts to ensure deterministic initial conditions.
+
+\subsection{Experimental SQL Transactions}
+The transactional workloads were designed to isolate the three classical read phenomena. In accordance with SQL coding conventions, transactional commands, query targets, and timing delays are presented below.
+
+\subsubsection{Dirty Read Workload}
+A transaction updates Account 101 without committing, while a concurrent transaction reads the uncommitted balance before a rollback occurs.
+
+\begin{lstlisting}[language=SQL, caption={Session 1 (Writer) Transaction for Dirty Read}]
+-- Session 1: Writer
+SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
+START TRANSACTION;
+UPDATE accounts SET balance = balance - 300.00 WHERE account_id = 101;
+SELECT 'W after update' AS step, balance FROM accounts WHERE account_id = 101;
+DO SLEEP(6); -- Hold uncommitted change
+ROLLBACK;    -- Reverts update back to 1000.00
+SELECT 'W after rollback' AS step, balance FROM accounts WHERE account_id = 101;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Session 2 (Reader) Transaction for Dirty Read}]
+-- Session 2: Reader
+SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
+DO SLEEP(2); -- Wait for Session 1's UPDATE
+START TRANSACTION;
+SELECT 'R1' AS step, balance FROM accounts WHERE account_id = 101;
+DO SLEEP(6); -- Wait for Session 1's ROLLBACK
+SELECT 'R2' AS step, balance FROM accounts WHERE account_id = 101;
+COMMIT;
+\end{lstlisting}
+
+\subsubsection{Non-Repeatable Read Workload}
+Session 1 performs an initial read on Account 101, pauses, and re-reads the row. Concurrently, Session 2 modifies and commits the balance during the pause.
+
+\begin{lstlisting}[language=SQL, caption={Session 1 (Reader) Transaction for Non-Repeatable Read}]
+-- Session 1: Reader
+SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
+START TRANSACTION;
+SELECT 'R1' AS step, balance FROM accounts WHERE account_id = 101;
+DO SLEEP(6); -- Pause while Session 2 updates and commits
+SELECT 'R2' AS step, balance FROM accounts WHERE account_id = 101;
+COMMIT;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Session 2 (Writer) Transaction for Non-Repeatable Read}]
+-- Session 2: Writer
+SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
+DO SLEEP(2); -- Wait for Session 1's first read
+START TRANSACTION;
+UPDATE accounts SET balance = balance + 200.00 WHERE account_id = 101;
+COMMIT;
+SELECT 'W committed' AS step, balance FROM accounts WHERE account_id = 101;
+\end{lstlisting}
+
+\subsubsection{Phantom Read Workload}
+Session 1 executes a range query on accounts with \texttt{balance >= 800.00}, pauses, and re-executes the query. Session 2 concurrently inserts a new qualifying row (Account 104 with balance \$1500.00). In Session 1, an update statement is also executed to evaluate InnoDB current-read behavior under REPEATABLE READ.
+
+\begin{lstlisting}[language=SQL, caption={Session 1 (Reader) Transaction for Phantom Read}]
+-- Session 1: Reader
+SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
+SET SQL_SAFE_UPDATES = 0;
+START TRANSACTION;
+SELECT 'P1' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 ORDER BY account_id;
+DO SLEEP(6); -- Pause while Session 2 inserts row 104
+SELECT 'P2' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 ORDER BY account_id;
+UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00;
+SELECT 'P3' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 ORDER BY account_id;
+COMMIT;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Session 2 (Inserter) Transaction for Phantom Read}]
+-- Session 2: Inserter
+SET SESSION TRANSACTION ISOLATION LEVEL <LEVEL>;
+DO SLEEP(2); -- Wait for Session 1's first range read
+START TRANSACTION;
+INSERT INTO accounts (account_id, customer_id, balance, status) VALUES (104, 4, 1500.00, 'ACTIVE');
+COMMIT;
+\end{lstlisting}
+
+\subsection{Summary of Baseline Results}
+Table~\ref{tab:baseline_matrix} summarizes the empirical findings across all 12 baseline test cases, comparing ANSI-92 expectations with observed InnoDB behavior.
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Comprehensive 12-Case Baseline Concurrency Matrix on MySQL InnoDB}
+\label{tab:baseline_matrix}
+\begin{tabularx}{\textwidth}{c l l c c c X}
+\toprule
+\textbf{Case} & \textbf{Anomaly} & \textbf{Isolation Level} & \textbf{ANSI-92} & \textbf{InnoDB Observed} & \textbf{Match} & \textbf{Observed Behavioral Note} \\
+\midrule
+1 & Dirty Read & READ UNCOMMITTED & Allowed & \textbf{ANOMALY} & Yes & S2 reads uncommitted balance (\$700.00) at $t=2.0$s prior to S1 rollback. \\
+2 & Dirty Read & READ COMMITTED & Prevented & None & Yes & S2 reads committed pre-image (\$1000.00) from undo log. \\
+3 & Dirty Read & REPEATABLE READ & Prevented & None & Yes & S2 reads from consistent snapshot (\$1000.00). \\
+4 & Dirty Read & SERIALIZABLE & Prevented & None & Yes & S2 read is blocked for 4.0s on S1's Exclusive Lock until rollback. \\
+\midrule
+5 & Non-Repeatable Read & READ UNCOMMITTED & Allowed & \textbf{ANOMALY} & Yes & S1 reads \$1000.00 at $t=0$s and \$1200.00 at $t=6$s ($R_1 \ne R_2$). \\
+6 & Non-Repeatable Read & READ COMMITTED & Allowed & \textbf{ANOMALY} & Yes & Second query establishes fresh Read View, reflecting committed \$1200.00. \\
+7 & Non-Repeatable Read & REPEATABLE READ & Prevented & None & Yes & Transaction-level Read View preserves \$1000.00 pre-image. \\
+8 & Non-Repeatable Read & SERIALIZABLE & Prevented & None & Yes & S1's Shared Lock blocks S2's UPDATE for 4.0s until S1 commits. \\
+\midrule
+9 & Phantom Read & READ UNCOMMITTED & Allowed & \textbf{ANOMALY} & Yes & Newly inserted Account 104 appears on second range query ($P_2$: 3 rows). \\
+10 & Phantom Read & READ COMMITTED & Allowed & \textbf{ANOMALY} & Yes & Fresh statement Read View reveals newly committed Account 104. \\
+11 & Phantom Read & REPEATABLE READ & Allowed & \textbf{Write-Only} & Yes & Snapshot hides Account 104 in $P_2$, but range UPDATE touches 104, revealing it in $P_3$. \\
+12 & Phantom Read & SERIALIZABLE & Prevented & None & Yes & S1's Next-Key Locks block S2's INSERT for 4.0s until S1 commits. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{Two-Column Interleaved Timelines (12 Baseline Cases)}
+The transaction interleaving for all 12 baseline configurations is presented below. Timestamps ($t_x$) denote elapsed wall-clock execution time captured by the automated runner.
+
+\subsubsection{Dirty Read Interleaving (Cases 1--4)}
+Tables~\ref{tab:dirty_ru_rc} and \ref{tab:dirty_rr_ser} document the concurrent execution between Session 1 (Writer) and Session 2 (Reader).
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Two-Column Interleaved Timelines: Dirty Read under READ UNCOMMITTED and READ COMMITTED}
+\label{tab:dirty_ru_rc}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1: Writer (\texttt{account\_id = 101})} & \textbf{Session 2: Reader (\texttt{account\_id = 101})} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 1: READ UNCOMMITTED --- Verdict: ANOMALY OBSERVED}} \\
+$t = 0.0$s & START TRANSACTION; UPDATE accounts SET balance = balance - 300.00 WHERE account\_id = 101; & DO SLEEP(2); \\
+$t = 0.0$s & SELECT 'W after update', balance $\rightarrow$ \textbf{700.00}; DO SLEEP(6); & (waiting on sleep) \\
+$t = 2.0$s & (holding uncommitted update) & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{700.00} \textbf{[DIRTY READ]}; \\
+$t = 6.0$s & ROLLBACK; SELECT 'W after rollback', balance $\rightarrow$ \textbf{1000.00}; & DO SLEEP(6); \\
+$t = 8.0$s & (transaction finished) & SELECT 'R2', balance $\rightarrow$ \textbf{1000.00}; COMMIT; \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 2: READ COMMITTED --- Verdict: PREVENTED}} \\
+$t = 0.0$s & START TRANSACTION; UPDATE accounts SET balance = balance - 300.00 WHERE account\_id = 101; & DO SLEEP(2); \\
+$t = 0.0$s & SELECT 'W after update', balance $\rightarrow$ \textbf{700.00}; DO SLEEP(6); & (waiting on sleep) \\
+$t = 2.0$s & (holding uncommitted update) & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{1000.00} \textbf{[NO DIRTY READ]}; \\
+$t = 6.0$s & ROLLBACK; SELECT 'W after rollback', balance $\rightarrow$ \textbf{1000.00}; & DO SLEEP(6); \\
+$t = 8.0$s & (transaction finished) & SELECT 'R2', balance $\rightarrow$ \textbf{1000.00}; COMMIT; \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Two-Column Interleaved Timelines: Dirty Read under REPEATABLE READ and SERIALIZABLE}
+\label{tab:dirty_rr_ser}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1: Writer (\texttt{account\_id = 101})} & \textbf{Session 2: Reader (\texttt{account\_id = 101})} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 3: REPEATABLE READ --- Verdict: PREVENTED}} \\
+$t = 0.0$s & START TRANSACTION; UPDATE accounts SET balance = balance - 300.00 WHERE account\_id = 101; & DO SLEEP(2); \\
+$t = 0.0$s & SELECT 'W after update', balance $\rightarrow$ \textbf{700.00}; DO SLEEP(6); & (waiting on sleep) \\
+$t = 2.0$s & (holding uncommitted update) & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{1000.00} \textbf{[NO DIRTY READ]}; \\
+$t = 6.0$s & ROLLBACK; SELECT 'W after rollback', balance $\rightarrow$ \textbf{1000.00}; & DO SLEEP(6); \\
+$t = 8.0$s & (transaction finished) & SELECT 'R2', balance $\rightarrow$ \textbf{1000.00}; COMMIT; \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 4: SERIALIZABLE --- Verdict: PREVENTED VIA LOCK CONTENTION}} \\
+$t = 0.0$s & START TRANSACTION; UPDATE accounts SET balance = balance - 300.00 WHERE account\_id = 101; [Holds X-Lock] & DO SLEEP(2); \\
+$t = 0.0$s & SELECT 'W after update', balance $\rightarrow$ \textbf{700.00}; DO SLEEP(6); & (waiting on sleep) \\
+$t = 2.0$s & (holding Exclusive X-Lock) & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{BLOCKED} (waits for S-Lock); \\
+$t = 6.0$s & ROLLBACK; [Releases X-Lock]; SELECT 'W after rollback' $\rightarrow$ \textbf{1000.00}; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ SELECT 'R1', balance $\rightarrow$ \textbf{1000.00}; DO SLEEP(6); \\
+$t = 12.0$s & (transaction finished) & SELECT 'R2', balance $\rightarrow$ \textbf{1000.00}; COMMIT; \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsubsection{Non-Repeatable Read Interleaving (Cases 5--8)}
+Tables~\ref{tab:nonrep_ru_rc} and \ref{tab:nonrep_rr_ser} document the concurrent execution between Session 1 (Reader) and Session 2 (Writer).
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Two-Column Interleaved Timelines: Non-Repeatable Read under READ UNCOMMITTED and READ COMMITTED}
+\label{tab:nonrep_ru_rc}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1: Reader (\texttt{account\_id = 101})} & \textbf{Session 2: Writer (\texttt{account\_id = 101})} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 5: READ UNCOMMITTED --- Verdict: ANOMALY OBSERVED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{1000.00}; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding transaction open) & START TRANSACTION; UPDATE accounts SET balance = balance + 200.00 WHERE account\_id = 101; COMMIT; \\
+$t = 2.0$s & (holding transaction open) & SELECT 'W committed', balance $\rightarrow$ \textbf{1200.00}; \\
+$t = 6.0$s & SELECT 'R2', balance $\rightarrow$ \textbf{1200.00} \textbf{[NON-REPEATABLE READ: $1000 \ne 1200$]}; COMMIT; & (transaction finished) \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 6: READ COMMITTED --- Verdict: ANOMALY OBSERVED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{1000.00}; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding transaction open) & START TRANSACTION; UPDATE accounts SET balance = balance + 200.00 WHERE account\_id = 101; COMMIT; \\
+$t = 2.0$s & (holding transaction open) & SELECT 'W committed', balance $\rightarrow$ \textbf{1200.00}; \\
+$t = 6.0$s & SELECT 'R2', balance $\rightarrow$ \textbf{1200.00} \textbf{[NON-REPEATABLE READ: fresh Read View]}; COMMIT; & (transaction finished) \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Two-Column Interleaved Timelines: Non-Repeatable Read under REPEATABLE READ and SERIALIZABLE}
+\label{tab:nonrep_rr_ser}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1: Reader (\texttt{account\_id = 101})} & \textbf{Session 2: Writer (\texttt{account\_id = 101})} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 7: REPEATABLE READ --- Verdict: PREVENTED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{1000.00} [Read View created]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding transaction open) & START TRANSACTION; UPDATE accounts SET balance = balance + 200.00 WHERE account\_id = 101; COMMIT; \\
+$t = 2.0$s & (holding transaction open) & SELECT 'W committed', balance $\rightarrow$ \textbf{1200.00}; \\
+$t = 6.0$s & SELECT 'R2', balance $\rightarrow$ \textbf{1000.00} \textbf{[REPEATABLE READ: Read View reused]}; COMMIT; & (transaction finished) \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 8: SERIALIZABLE --- Verdict: PREVENTED VIA LOCK CONTENTION}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'R1', balance $\rightarrow$ \textbf{1000.00} [Acquires S-Lock]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding Shared S-Lock) & START TRANSACTION; UPDATE accounts SET balance = balance + 200.00 $\rightarrow$ \textbf{BLOCKED}; \\
+$t = 6.0$s & SELECT 'R2', balance $\rightarrow$ \textbf{1000.00}; COMMIT; [Releases S-Lock]; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ UPDATE completes; COMMIT; \\
+$t = 6.0$s & (transaction finished) & SELECT 'W committed', balance $\rightarrow$ \textbf{1200.00}; \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsubsection{Phantom Read Interleaving (Cases 9--12)}
+Tables~\ref{tab:phantom_ru_rc} and \ref{tab:phantom_rr_ser} document the concurrent execution between Session 1 (Reader) and Session 2 (Inserter).
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Two-Column Interleaved Timelines: Phantom Read under READ UNCOMMITTED and READ COMMITTED}
+\label{tab:phantom_ru_rc}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1: Reader (\texttt{WHERE balance >= 800.00})} & \textbf{Session 2: Inserter (\texttt{account\_id = 104})} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 9: READ UNCOMMITTED --- Verdict: ANOMALY OBSERVED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'P1', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows); DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding transaction open) & START TRANSACTION; INSERT INTO accounts VALUES (104, 4, 1500.00, 'ACTIVE'); COMMIT; \\
+$t = 6.0$s & SELECT 'P2', account\_id $\rightarrow$ \textbf{[101, 103, 104]} (3 rows) \textbf{[PHANTOM READ]}; & (transaction finished) \\
+$t = 6.0$s & UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00; & (transaction finished) \\
+$t = 6.0$s & SELECT 'P3', account\_id $\rightarrow$ \textbf{[101, 103, 104]}; COMMIT; & (transaction finished) \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 10: READ COMMITTED --- Verdict: ANOMALY OBSERVED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'P1', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows); DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding transaction open) & START TRANSACTION; INSERT INTO accounts VALUES (104, 4, 1500.00, 'ACTIVE'); COMMIT; \\
+$t = 6.0$s & SELECT 'P2', account\_id $\rightarrow$ \textbf{[101, 103, 104]} (3 rows) \textbf{[PHANTOM READ: fresh Read View]}; & (transaction finished) \\
+$t = 6.0$s & UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00; & (transaction finished) \\
+$t = 6.0$s & SELECT 'P3', account\_id $\rightarrow$ \textbf{[101, 103, 104]}; COMMIT; & (transaction finished) \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Two-Column Interleaved Timelines: Phantom Read under REPEATABLE READ and SERIALIZABLE}
+\label{tab:phantom_rr_ser}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1: Reader (\texttt{WHERE balance >= 800.00})} & \textbf{Session 2: Inserter (\texttt{account\_id = 104})} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 11: REPEATABLE READ --- Verdict: WRITE-ONLY PHANTOM OCCURS}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'P1', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows) [Snapshot created]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding transaction open) & START TRANSACTION; INSERT INTO accounts VALUES (104, 4, 1500.00, 'ACTIVE'); COMMIT; \\
+$t = 6.0$s & SELECT 'P2', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows) \textbf{[HIDDEN BY MVCC SNAPSHOT]}; & (transaction finished) \\
+$t = 6.0$s & UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00; [Current-read updates row 104]; & (transaction finished) \\
+$t = 6.0$s & SELECT 'P3', account\_id $\rightarrow$ \textbf{[101, 103, 104]} (3 rows) \textbf{[WRITE-ONLY PHANTOM REVEALED]}; COMMIT; & (transaction finished) \\
+\midrule
+\multicolumn{3}{l}{\textbf{Case 12: SERIALIZABLE --- Verdict: PREVENTED VIA NEXT-KEY GAP LOCK}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'P1', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows) [Holds Next-Key Locks]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding Next-Key Locks on range and gap) & START TRANSACTION; INSERT INTO accounts VALUES (104, 4, 1500.00, 'ACTIVE') $\rightarrow$ \textbf{BLOCKED}; \\
+$t = 6.0$s & SELECT 'P2', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows); & (waiting on Next-Key lock) \\
+$t = 6.0$s & UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00; (affected = 2 rows); & (waiting on Next-Key lock) \\
+$t = 6.0$s & SELECT 'P3', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows); COMMIT; [Releases Next-Key Locks]; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ INSERT completes; COMMIT; \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{Explicit Locking Experiments Framework (Member 4)}
+To evaluate lock-based concurrency control as an alternative to elevating entire transaction isolation levels, four explicit locking configurations were tested using row-level locks:
+\begin{enumerate}
+    \item \textbf{Lock Case 1 (Preventing Dirty Reads under READ UNCOMMITTED):} Using \texttt{SELECT ... FOR UPDATE} or table locks.
+    \item \textbf{Lock Case 2 (Preventing Non-Repeatable Reads under READ COMMITTED):} Employing \texttt{SELECT ... FOR SHARE} or \texttt{FOR UPDATE} on single-row lookups.
+    \item \textbf{Lock Case 3 (Preventing Phantom Reads under READ COMMITTED / REPEATABLE READ):} Employing locking range reads (\texttt{SELECT ... FOR UPDATE WHERE balance >= 800.00}) to invoke explicit Next-Key locking.
+    \item \textbf{Lock Case 4 (Performance and Deadlock Benchmarks under Explicit Locking):} Measuring lock-wait latency, lock wait timeouts (\texttt{innodb\_lock\_wait\_timeout}), and throughput trade-offs across concurrent connections.
+\end{enumerate}
+
+%% [Member 4 Lock Experiment empirical data, charts, and metrics to be populated here]
 
 %%
 %% This local block overrides the missing file error and registers your specific citation keys.
