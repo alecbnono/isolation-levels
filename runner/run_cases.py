@@ -30,10 +30,11 @@ LEVELS = {
     "SER": "SERIALIZABLE",
 }
 CASES = ["dirty", "nonrepeatable", "phantom"]
-LOCK_CASES = ["lock1", "lock2", "lock3", "lock4"]
+LOCK_CASES = ["lock1", "lock2", "lock3", "lock4", "lock5", "lock6"]
 FILES = {"dirty": "dirty_read", "nonrepeatable": "nonrepeatable_read", "phantom": "phantom_read", 
-         "lock1": "lock_case1", "lock2": "lock_case2", "lock3": "lock_case3", "lock4": "lock_case4"}
-LOCK_LEVEL = {"lock1": "RU", "lock2": "RC", "lock3": "RR", "lock4": "RC"}
+         "lock1": "lock_case1", "lock2": "lock_case2", "lock3": "lock_case3", "lock4": "lock_case4",
+         "lock5": "lock_case5", "lock6": "lock_case6"}
+LOCK_LEVEL = {"lock1": "RU", "lock2": "RC", "lock3": "RR", "lock4": "RC", "lock5": "SER", "lock6": "SER"}
 
 
 # Expected outcome on InnoDB (True = anomaly visible)
@@ -46,7 +47,11 @@ EXPECTED = {
 }
 
 LOCK_EXPECTED = {"lock1": "PREVENTED (Blocked)", "lock2": "PREVENTED (Repeatable)",
-                 "lock3": "PREVENTED (Gap Locked)", "lock4": "PREVENTED (Table Locked)"}
+                 "lock3": "PREVENTED (Gap Locked)", "lock4": "PREVENTED (Table Locked)",
+                 # lock5/lock6: SERIALIZABLE already prevents all 3 anomalies, so these measure the
+                 # concurrency cost of lock granularity: does S2's write to an UNRELATED row (102) wait?
+                 "lock5": "NO COLLATERAL WAIT (Row Lock)", "lock6": "COLLATERAL WAIT (Table Lock)"}
+COLLATERAL_WAIT_THRESHOLD = 1.0  # seconds; S2 waiting longer than this on row 102 = blocked by S1
 
 
 def split_statements(text):
@@ -87,8 +92,8 @@ def run_session(name, path, level, args, barrier, t0_box, log, results):
     if "lock" not in Path(path).name:
         stmts = [re.sub(r"(?i)^SET SESSION TRANSACTION ISOLATION LEVEL [A-Z ]+$",
                     f"SET SESSION TRANSACTION ISOLATION LEVEL {LEVELS[level]}", s) for s in stmts]
-    conn = connect(args)
-
+    conn = connect(args, lock_case="lock" in Path(path).name)
+    max_wait = 0.0  # longest non-SLEEP statement duration = time spent blocked on a lock
 
     try:
         barrier.wait()
@@ -96,6 +101,7 @@ def run_session(name, path, level, args, barrier, t0_box, log, results):
             t0_box[0] = time.time()
         for stmt in stmts:
             t_start = time.time() - t0_box[0]
+            is_sleep = stmt.upper().startswith("DO SLEEP")
             m = re.match(r"(?is)select\s+'([^']+)'\s+as\s+step", stmt)
             label = m.group(1) if m else None
             try:
@@ -104,6 +110,8 @@ def run_session(name, path, level, args, barrier, t0_box, log, results):
                     rows = cur.fetchall() if cur.description else None
                     affected = cur.rowcount
                 t_end = time.time() - t0_box[0]
+                if not is_sleep:
+                    max_wait = max(max_wait, t_end - t_start)
                 if rows is not None and label:
                     rows = [{k: (float(v) if hasattr(v, "as_tuple") else v) for k, v in r.items()} for r in rows]
                     results[(name, label)] = rows
@@ -117,6 +125,7 @@ def run_session(name, path, level, args, barrier, t0_box, log, results):
                 results[(name, "error")] = str(e)
                 break
     finally:
+        results[(name, "max_wait")] = max_wait
         conn.close()
 
 def expected_for(case, level):
@@ -142,6 +151,12 @@ def judge(case, results):
     if case == "lock4":
         p1, p2 = ids(g("S1", "P1")), ids(g("S1", "P2"))
         return "PREVENTED (Table Locked)" if p1 is not None and p2 is not None and p1 == p2 else "ANOMALY (Phantom Insert)"
+    if case in ("lock5", "lock6"):
+        r1, r2 = g("S1", "R1"), g("S1", "R2")
+        if not (r1 and r2 and r1[0]["balance"] == r2[0]["balance"]):
+            return "ANOMALY (Non-Repeatable)"
+        waited = results.get(("S2", "max_wait"), 0.0) > COLLATERAL_WAIT_THRESHOLD
+        return "COLLATERAL WAIT (Table Lock)" if waited else "NO COLLATERAL WAIT (Row Lock)"
 
     # -- BASE EXPERIMENT EVALUATION --
     if any(k[1] == "error" for k in results):
@@ -178,10 +193,13 @@ def run_case(case, level, args):
     for t in threads: t.join()
     log.sort(key=lambda e: e[0])
     verdict = judge(case, results)
-    text = [f"=== {case.upper()} @ {LEVELS[level]} ===  (total {time.time() - start:.1f}s)"]
+    total = time.time() - start
+    s2_wait = results.get(("S2", "max_wait"), 0.0)
+    text = [f"=== {case.upper()} @ {LEVELS[level]} ===  (total {total:.1f}s)"]
     text += [f"[t={t:5.1f}s] {s}: {msg}" for t, s, msg in log]
+    text.append(f"S2 LOCK WAIT: {s2_wait:.1f}s")
     text.append(f"VERDICT: {verdict}   (expected on InnoDB: {expected_for(case, level)})")
-    return verdict, "\n".join(text)
+    return verdict, s2_wait, total, "\n".join(text)
 
 
 def main():
@@ -208,17 +226,24 @@ def main():
     for c in cases:
         # lock cases run once, at the level their SQL file is written for
         for l in ([LOCK_LEVEL[c]] if c in LOCK_CASES else levels):
-            verdict, text = run_case(c, l, args)
+            verdict, s2_wait, total, text = run_case(c, l, args)
             print(text, "\n")
             (ROOT / "logs" / f"{c}_{l}.log").write_text(text + "\n")
-            rows.append((c, LEVELS[l], verdict, expected_for(c, l)))
- 
-    out = ["| Case | Isolation level | Observed | Expected (InnoDB) | Match |", "|---|---|---|---|---|"]
-    for c, l, v, e in rows:
-        out.append(f"| {c} | {l} | {v} | {e} | {'yes' if v == e else '**NO**'} |")
-    summary = "\n".join(out)
-    print(summary)
-    (ROOT / "results" / "summary.md").write_text(summary + "\n")
+            rows.append((c, LEVELS[l], verdict, expected_for(c, l), s2_wait, total))
+
+    # Baseline and lock results go to separate files so neither run overwrites the other.
+    # A partial run (--case/--level) only rewrites the file for the cases it actually ran.
+    for kind, fname in (("baseline", "summary.md"), ("lock", "lock_summary.md")):
+        subset = [r for r in rows if (r[0] in LOCK_CASES) == (kind == "lock")]
+        if not subset:
+            continue
+        out = ["| Case | Isolation level | Observed | Expected (InnoDB) | Match | S2 lock wait | Total runtime |",
+               "|---|---|---|---|---|---|---|"]
+        for c, l, v, e, w, t in subset:
+            out.append(f"| {c} | {l} | {v} | {e} | {'yes' if v == e else '**NO**'} | {w:.1f}s | {t:.1f}s |")
+        summary = "\n".join(out)
+        print(summary, "\n")
+        (ROOT / "results" / fname).write_text(summary + "\n")
 
 
 if __name__ == "__main__":

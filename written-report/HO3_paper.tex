@@ -11,6 +11,10 @@
 \usepackage{tabularx}
 \usepackage{booktabs}
 
+%% Marks values that still have to be filled in from an actual runner execution.
+%% Search for \pending before submitting; none should remain in the final PDF.
+\newcommand{\pending}[1]{\textcolor{red}{\textbf{[PENDING RUN: #1]}}}
+
 \AtBeginDocument{%
   \providecommand\BibTeX{{%
     \normalfont{B}\kern-0.5em{\scshape i\kern-0.25em b}\kern-0.8em\TeX}}}
@@ -94,37 +98,46 @@
 %%
 \section{Introduction}
 
-Modern relational database management systems (RDBMS) rely on concurrency controls to enable the simultaneous execution of multiple transactions while ensuring data integrity. ANSI's SQL-92 standards define four transaction isolation levels to balance data consistency and control a system's susceptibility to the following three read anomalies: \textbf{Dirty Reads}, \textbf{Non-Repeatable Reads}, and \textbf{Phantom Reads}. 
+Modern relational database management systems (RDBMS) rely on concurrency controls to enable the simultaneous execution of multiple transactions while ensuring data integrity~\cite{Silberschatz2020}. ANSI's SQL-92 standard~\cite{ANSI1992} defines four transaction isolation levels to balance data consistency and control a system's susceptibility to the following three read anomalies: \textbf{Dirty Reads}, \textbf{Non-Repeatable Reads}, and \textbf{Phantom Reads}~\cite{Berenson1995}. 
 
-This study evaluates the operation behavior of MySQL's \textbf{InnoDB} storage engine under concurrent workload execution. A multi-session testing environment was constructed to observe Multi-Version Concurrency Control behavior across all four isolation levels: \textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, and \textbf{SERIALIZABLE}. 
+This study evaluates the operation behavior of MySQL's \textbf{InnoDB} storage engine under concurrent workload execution. A multi-session testing environment was constructed to observe Multi-Version Concurrency Control (MVCC)~\cite{MySQLConsistentRead} and lock-based behavior across all four isolation levels~\cite{MySQLIsolation}: \textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, and \textbf{SERIALIZABLE}. 
 
 \subsection {Relational Schema Design}
-The experimental domain models MySQL's Sakila database. The relational tables are defined with explicit foreign key constraints and transactional support powered by the \textbf{InnoDB} engine. 
+The experimental schema is derived from MySQL's Sakila sample database~\cite{Sakila}. The \texttt{customer} table is a simplified copy of \texttt{sakila.customer}, reduced from nine columns to five (the \texttt{store\_id} and \texttt{address\_id} foreign keys and the \texttt{create\_date} and \texttt{last\_update} audit columns were dropped), and is populated with the real Sakila customers 1--5. Two five-column tables, \texttt{accounts} and \texttt{transactions}, model a payment/balance workload owned by those customers, following the banking examples used in the lecture slides~\cite{LectureNotes}. All tables use the \textbf{InnoDB} engine, since MyISAM does not support transactions; the database is standalone, so Sakila itself does not need to be loaded.
 
-The schema definition for the tracking tables is implemented as follows:
+The schema definition is implemented as follows (\texttt{sql/setup/00\_schema.sql}):
 
-\begin{lstlisting}[language=SQL, caption={DDL Schema Definition for Accounts and Transactions}]
-CREATE TABLE IF NOT EXISTS accounts (
-    account_id INT PRIMARY KEY AUTO_INCREMENT,
-    customer_id INT NOT NULL,
-    balance DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+\begin{lstlisting}[language=SQL, caption={DDL Schema Definition for Customer, Accounts, and Transactions}]
+CREATE TABLE customer (
+    customer_id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    first_name  VARCHAR(45) NOT NULL,
+    last_name   VARCHAR(45) NOT NULL,
+    email       VARCHAR(50) DEFAULT NULL,
+    active      BOOLEAN NOT NULL DEFAULT TRUE,
+    PRIMARY KEY (customer_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE accounts (
+    account_id  INT PRIMARY KEY AUTO_INCREMENT,
+    customer_id SMALLINT UNSIGNED NOT NULL,
+    balance     DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+    status      VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS transactions (
+CREATE TABLE transactions (
     transaction_id INT PRIMARY KEY AUTO_INCREMENT,
-    account_id INT NOT NULL,
-    type VARCHAR(20) NOT NULL, -- 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER'
-    amount DECIMAL(10, 2) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    account_id     INT NOT NULL,
+    type           VARCHAR(20) NOT NULL, -- 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER'
+    amount         DECIMAL(10, 2) NOT NULL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (account_id) REFERENCES accounts(account_id)
 ) ENGINE=InnoDB;
 \end{lstlisting} 
 
 \subsection{Initial Seed Data}
-The environment was initialized with three core account entities to provide baseline states for concurrent query execution:
+The environment was initialized with three core account entities to provide baseline states for concurrent query execution (\texttt{sql/setup/01\_seed.sql}). Before every test case the runner truncates \texttt{accounts} and \texttt{transactions} and re-applies this seed.
 
 \smallskip
 
@@ -133,9 +146,13 @@ The environment was initialized with three core account entities to provide base
 
 \noindent
 \begin{tabularx}{\columnwidth}{XXXX}
-101 & 1 & 1000.00 & ACTIVE \\
-102 & 2 & 500.00  & ACTIVE \\
-103 & 3 & 2500.00 & ACTIVE \\
+\toprule
+\textbf{account\_id} & \textbf{customer\_id} & \textbf{balance} & \textbf{status} \\
+\midrule
+101 & 1 (MARY SMITH) & 1000.00 & ACTIVE \\
+102 & 2 (PATRICIA JOHNSON) & 500.00  & ACTIVE \\
+103 & 3 (LINDA WILLIAMS) & 2500.00 & ACTIVE \\
+\bottomrule
 \end{tabularx}
 
 \vspace{0.4cm} 
@@ -145,15 +162,19 @@ The environment was initialized with three core account entities to provide base
 
 \noindent
 \begin{tabularx}{\columnwidth}{XXX}
+\toprule
+\textbf{account\_id} & \textbf{type} & \textbf{amount} \\
+\midrule
 101 & DEPOSIT & 1000.00 \\
 102 & DEPOSIT & 500.00  \\
 103 & DEPOSIT & 2500.00 \\
+\bottomrule
 \end{tabularx}
 \vspace{0.3cm}
 
 \section{Experiments}
 
-To evaluate concurrency control across the four ANSI SQL-92 isolation levels (\textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, and \textbf{SERIALIZABLE}), a multi-session experimental framework was implemented. The test harness employs two concurrent database connections managed by a multithreaded Python harness with barrier synchronization (\texttt{threading.Barrier}), enforcing precise statement interleaving across dual sessions via controlled \texttt{DO SLEEP()} delays.
+To evaluate concurrency control across the four ANSI SQL-92 isolation levels (\textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, and \textbf{SERIALIZABLE}), a multi-session experimental framework was implemented. The test harness employs two concurrent database connections managed by a multithreaded Python harness with barrier synchronization (\texttt{threading.Barrier})~\cite{PythonThreading,PyMySQL}, enforcing precise statement interleaving across dual sessions via controlled \texttt{DO SLEEP()} delays.
 
 A total of 12 baseline experiments ($4\text{ isolation levels} \times 3\text{ read anomalies}$) were systematically executed and logged. Prior to every individual test case, the database state was reset and re-seeded using automated DDL/DML scripts to ensure deterministic initial conditions.
 
@@ -275,14 +296,14 @@ Table~\ref{tab:baseline_matrix} summarizes the empirical findings across all 12 
 \subsection{Two-Column Interleaved Timelines and Empirical Discussion}
 The empirical execution results for all 12 baseline configurations are summarized in Table~\ref{tab:baseline_matrix}. To preserve readability in the main text while providing complete empirical transparency, the full two-column interleaved execution traces ($t_x$) across all four isolation levels are grouped into three consolidated configuration tables located in the Appendix:
 \begin{itemize}
-    \item \textbf{Dirty Read Workload (Cases 1--4):} Documented in Appendix Table~\ref{tab:app_dirty}, illustrating the visibility of uncommitted writes under READ UNCOMMITTED, undo-log pre-image reconstruction under READ COMMITTED and REPEATABLE READ, and Two-Phase Locking contention (4.0s lock block) under SERIALIZABLE.
+    \item \textbf{Dirty Read Workload (Cases 1--4):} Documented in Appendix Table~\ref{tab:app_dirty} (with a manual Workbench capture of Case 1 shown in Figure~\ref{fig:dirty_read_manual}), illustrating the visibility of uncommitted writes under READ UNCOMMITTED, undo-log pre-image reconstruction under READ COMMITTED and REPEATABLE READ, and Two-Phase Locking contention (4.0s lock block) under SERIALIZABLE.
     \item \textbf{Non-Repeatable Read Workload (Cases 5--8):} Documented in Appendix Table~\ref{tab:app_nonrep}, contrasting statement-level Read Views (fresh snapshot per query under READ COMMITTED) against transaction-level Read View reuse under REPEATABLE READ, and Shared-Lock blocking under SERIALIZABLE.
     \item \textbf{Phantom Read Workload (Cases 9--12):} Documented in Appendix Table~\ref{tab:app_phantom}, demonstrating the classic phantom anomaly in READ UNCOMMITTED and READ COMMITTED, the snapshot hiding and write-only phantom manifestation in REPEATABLE READ, and index gap lock prevention in SERIALIZABLE.
 \end{itemize}
 
 \subsubsection{Read View Mechanics: READ COMMITTED vs. REPEATABLE READ}
 The difference between READ COMMITTED and REPEATABLE READ for non-repeatable reads stems from allocation policies in Multi-Version Concurrency Control (MVCC) Read View.
-Under READ COMMITTED, InnoDB generates statement-level Read Views at the execution of each individual \texttt{SELECT}. 
+Under READ COMMITTED, InnoDB generates statement-level Read Views at the execution of each individual \texttt{SELECT}~\cite{MySQLConsistentRead,MySQLIsolation}. 
 As session 2 updates to \$1200.00 at $t=2.0$s, Session 1's query at $t=6.0$s generates a 
 new Read View that incorporates this committed state, resulting in a non-repeatable read ($R_1 \ne R_2$). 
 In contrast, REPEATABLE READ establishes a single, transaction-level Read View upon the execution of a transaction's first read ($t=0.0$s), maintaining it until termination. 
@@ -298,18 +319,18 @@ to reconstruct the committed pre-image of \$1000.00, successfully preserving rea
 
 \subsubsection{The Phantom Phenomenon under REPEATABLE READ}
 The ``Write-Only Phantom'' under REPEATABLE READ highlights a distinction between InnoDB's MVCC Snapshot Reads and Current Reads. 
-According to ANSI SQL-92's specifications, REPEATABLE READ permits phantom rows on re-queries. 
+According to ANSI SQL-92's specifications~\cite{ANSI1992,Berenson1995}, REPEATABLE READ permits phantom rows on re-queries. 
 However, InnoDB mitigates standard read phantoms by utilizing consistent read snapshots; as observed in query $P_2$ at $t=6.0$s, Session 1's plain \texttt{SELECT} 
 continues to return only the original two accounts ([101, 103]), completely concealing Session 2's committed insert of Account 104. 
-However, when Session 1 subsequently executes a range modification (\texttt{UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00}), the database engine switches to a Current Read to ensure data integrity. 
+However, when Session 1 subsequently executes a range modification (\texttt{UPDATE accounts SET status = 'FLAGGED' WHERE balance >= 800.00}), the database engine switches to a Current Read to ensure data integrity~\cite{MySQLConsistentRead,MySQLLockingReads}. 
 The \texttt{UPDATE} scans the current clustered index, matches the committed row 104, and updates it. 
 Crucially, this operation rewrites row 104's header metadata (\texttt{DB\_TRX\_ID}) with Session 1's own transaction ID. 
 Because MVCC rules dictate that a transaction can always observe its own writes, the subsequent query $P_3$ reveals Account 104 alongside accounts 101 and 103. 
 The phantom is therefore ``write-only'', as it cannot be triggered through non-locking reads alone but is unmasked once a transaction modifies a phantom record.
 
 \subsubsection{Strict Two-Phase Locking and Empirical Lock Contention}
-The 4.0-second execution delay observed in the SERIALIZABLE logs validates Strict Two-Phase Locking (SS2PL) and lock compatibility enforcement. 
-In SERIALIZABLE mode, as non-locking MVCC reads are disabled, all \texttt{SELECT} statements acquire Shared Locks (S-locks), while \texttt{UPDATE} statements acquire Exclusive Locks (X-locks). 
+The 4.0-second execution delay observed in the SERIALIZABLE logs validates Strict Two-Phase Locking (SS2PL) and lock compatibility enforcement~\cite{Silberschatz2020,GrayReuter1992}. 
+In SERIALIZABLE mode, as non-locking MVCC reads are disabled~\cite{MySQLIsolation}, all \texttt{SELECT} statements acquire Shared Locks (S-locks), while \texttt{UPDATE} statements acquire Exclusive Locks (X-locks). 
 In the Dirty Read experiment (Case 4), Session 1 enters its Growing Phase at $t=0.0$s by acquiring an X-lock on Account 101 and holds it across its 6-second sleep. 
 When Session 2 issues a read at $t=2.0$s requesting an S-lock, InnoDB blocks the request due to S/X lock conflict. 
 Under Strict 2PL, Session 1 only enters its Shrinking Phase upon issuing \texttt{ROLLBACK} at $t=6.0$s, releasing all acquired locks. 
@@ -317,15 +338,95 @@ Session 2 is immediately granted the S-lock, logging an exact lock wait duration
 An identical 4.0s block occurs in Case 8, where Session 1's S-lock blocks Session 2's X-lock update until Session 1 commits.
 
 \subsection{Explicit Locking Experiments}
-To evaluate lock-based concurrency control as an alternative to elevating the isolation level of an entire transaction, four explicit locking configurations were tested. Each case keeps an isolation level at which the target anomaly can occur and adds an explicit lock. Three cases use row-level locking reads, and one uses a table-level lock:
+To evaluate lock-based concurrency control as an alternative to elevating the isolation level of an entire transaction, six explicit locking configurations were tested, covering all four isolation levels. Cases 1--4 keep an isolation level at which the target anomaly can occur and add an explicit lock~\cite{MySQLLockingReads,MySQLLockTables}. Because SERIALIZABLE already prevents all three anomalies (Cases 4, 8, and 12), Cases 5 and 6 instead hold the anomaly-prevention goal fixed at SERIALIZABLE and vary only the lock \emph{granularity}, so that its concurrency cost can be measured directly:
 \begin{enumerate}
     \item \textbf{Lock Case 1 (Preventing Dirty Reads under READ UNCOMMITTED):} Session 2 reads Account 101 using \texttt{SELECT ... FOR UPDATE}, so it must wait for Session 1's exclusive row lock instead of reading the uncommitted balance.
     \item \textbf{Lock Case 2 (Preventing Non-Repeatable Reads under READ COMMITTED):} Session 1 reads Account 101 using \texttt{SELECT ... FOR SHARE}, holding a shared row lock that blocks Session 2's \texttt{UPDATE} until Session 1 commits.
-    \item \textbf{Lock Case 3 (Preventing Phantom Reads under REPEATABLE READ):} Session 1 performs a locking range read (\texttt{SELECT ... WHERE balance >= 800.00 FOR UPDATE}), which acquires next-key locks that block Session 2's \texttt{INSERT}.
+    \item \textbf{Lock Case 3 (Preventing Phantom Reads under REPEATABLE READ):} Session 1 performs a locking range read (\texttt{SELECT ... WHERE balance >= 800.00 FOR UPDATE}), which acquires next-key locks~\cite{MySQLNextKey} that block Session 2's \texttt{INSERT}.
     \item \textbf{Lock Case 4 (Preventing Phantom Reads under READ COMMITTED):} Session 1 acquires a table-level lock using \texttt{LOCK TABLES accounts READ}, which blocks Session 2's \texttt{INSERT} until \texttt{UNLOCK TABLES}.
+    \item \textbf{Lock Case 5 (Row-Level Lock under SERIALIZABLE):} Session 1 reads Account 101 twice with \texttt{SELECT ... FOR UPDATE}, while Session 2 updates the \emph{unrelated} Account 102.
+    \item \textbf{Lock Case 6 (Table-Level Lock under SERIALIZABLE):} The same workload as Case 5, except Session 1 protects its reads with \texttt{LOCK TABLES accounts WRITE}.
 \end{enumerate}
 
-Table~\ref{tab:lock_matrix} summarizes the results. In all four cases, the anomaly observed at the corresponding baseline isolation level was prevented, at the cost of a 4.0s wait in Session 2.
+Table~\ref{tab:lock_coverage} maps each isolation level to the lock experiments run at that level.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Lock Experiment Coverage per Isolation Level}
+\label{tab:lock_coverage}
+\begin{tabularx}{\columnwidth}{l X}
+\toprule
+\textbf{Isolation Level} & \textbf{Lock Cases} \\
+\midrule
+READ UNCOMMITTED & 1 (row, \texttt{FOR UPDATE}) \\
+READ COMMITTED   & 2 (row, \texttt{FOR SHARE}); 4 (table, \texttt{READ}) \\
+REPEATABLE READ  & 3 (row/next-key, \texttt{FOR UPDATE}) \\
+SERIALIZABLE     & 5 (row, \texttt{FOR UPDATE}); 6 (table, \texttt{WRITE}) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Lock Experiment Transactions}
+The listings below show the statements that differ from the corresponding baseline workloads (\texttt{sql/cases/lock\_case<n>\_s<1|2>.sql}); the \texttt{SET SESSION TRANSACTION ISOLATION LEVEL} line of each session is fixed to the level in Table~\ref{tab:lock_coverage}. The full two-column timelines are given in Appendix Table~\ref{tab:app_lock}.
+
+\begin{lstlisting}[language=SQL, caption={Lock Case 1: Session 2 Locking Read (READ UNCOMMITTED)}]
+-- Session 1 is unchanged from the Dirty Read writer
+DO SLEEP(2);
+START TRANSACTION;
+-- Blocks until Session 1's ROLLBACK releases its X-lock
+SELECT 'R1' AS step, balance FROM accounts WHERE account_id = 101 FOR UPDATE;
+DO SLEEP(2);
+SELECT 'R2' AS step, balance FROM accounts WHERE account_id = 101 FOR UPDATE;
+COMMIT;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Lock Case 2: Session 1 Shared Locking Read (READ COMMITTED)}]
+-- Session 2 is unchanged from the Non-Repeatable Read writer
+START TRANSACTION;
+SELECT 'R1' AS step, balance FROM accounts WHERE account_id = 101 FOR SHARE;
+DO SLEEP(6); -- Session 2's UPDATE waits on the S-lock
+SELECT 'R2' AS step, balance FROM accounts WHERE account_id = 101 FOR SHARE;
+COMMIT;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Lock Case 3: Session 1 Locking Range Read (REPEATABLE READ)}]
+-- Session 2 is unchanged from the Phantom Read inserter
+START TRANSACTION;
+-- balance is unindexed: full PRIMARY KEY scan locks every row and gap
+SELECT 'P1' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 FOR UPDATE;
+DO SLEEP(6);
+SELECT 'P2' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 FOR UPDATE;
+COMMIT;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Lock Case 4: Session 1 Explicit Table Lock (READ COMMITTED)}]
+-- Session 2 is unchanged from the Phantom Read inserter
+-- No START TRANSACTION: it would implicitly release the table lock
+LOCK TABLES accounts READ;
+SELECT 'P1' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 ORDER BY account_id;
+DO SLEEP(6);
+SELECT 'P2' AS step, account_id, balance FROM accounts WHERE balance >= 800.00 ORDER BY account_id;
+UNLOCK TABLES;
+\end{lstlisting}
+
+\begin{lstlisting}[language=SQL, caption={Lock Cases 5 and 6: Row Lock vs. Table Lock (SERIALIZABLE)}]
+-- Session 1, Case 5 (row lock)       -- Session 1, Case 6 (table lock)
+START TRANSACTION;                    -- LOCK TABLES accounts WRITE;
+SELECT 'R1' AS step, balance FROM accounts WHERE account_id = 101 FOR UPDATE;
+DO SLEEP(6);
+SELECT 'R2' AS step, balance FROM accounts WHERE account_id = 101 FOR UPDATE;
+COMMIT;                               -- UNLOCK TABLES;
+
+-- Session 2 (identical in both cases): writes an UNRELATED row
+DO SLEEP(2);
+START TRANSACTION;
+UPDATE accounts SET balance = balance + 50.00 WHERE account_id = 102;
+COMMIT;
+\end{lstlisting}
+
+\subsubsection{Lock Experiment Results}
+Table~\ref{tab:lock_matrix} summarizes the results. In Cases 1--4, the anomaly observed at the corresponding baseline isolation level was prevented, at the cost of a 4.0s wait in Session 2.
 
 \begin{table*}[t]
 \centering
@@ -340,6 +441,9 @@ Table~\ref{tab:lock_matrix} summarizes the results. In all four cases, the anoma
 2 & Non-Repeatable Read & READ COMMITTED & \texttt{SELECT ... FOR SHARE} & 4.0s & S1 reads \$1000.00 in both R1 and R2; S2's update commits \$1200.00 only after S1 commits. \\
 3 & Phantom Read & REPEATABLE READ & \texttt{SELECT ... FOR UPDATE} & 4.0s & P1 and P2 both return Accounts 101 and 103; Account 104 is inserted only after S1 commits. \\
 4 & Phantom Read & READ COMMITTED & \texttt{LOCK TABLES ... READ} & 4.0s & P1 and P2 both return Accounts 101 and 103; Account 104 is inserted only after \texttt{UNLOCK TABLES}. \\
+\midrule
+5 & Non-Repeatable Read & SERIALIZABLE & \texttt{SELECT ... FOR UPDATE} & 0.0s & S1 reads \$1000.00 in R1 and R2; S2's update of Account 102 completes immediately (0.0s wait) without collateral blocking. \\
+6 & Non-Repeatable Read & SERIALIZABLE & \texttt{LOCK TABLES ... WRITE} & 4.0s & S1 reads \$1000.00 in R1 and R2; S2's update of Account 102 blocks for 4.0s until \texttt{UNLOCK TABLES} due to coarse granularity. \\
 \bottomrule
 \end{tabularx}
 \end{table*}
@@ -347,6 +451,55 @@ Table~\ref{tab:lock_matrix} summarizes the results. In all four cases, the anoma
 Supplementary runs clarified the scope of the two phantom-prevention methods. Because \texttt{balance} is not indexed, the locking read in Lock Case 3 scans the entire primary key and locks every row and gap, not only the range \texttt{balance >= 800.00}. An \texttt{INSERT} with a balance of \$100.00, outside the queried range, was likewise blocked for 4.0s; after an index was added on \texttt{balance}, that insert proceeded immediately while a \$1500.00 insert remained blocked. The same locking read did not prevent the phantom under READ COMMITTED, where InnoDB does not use gap locks for this search: the \texttt{INSERT} proceeded immediately and Account 104 appeared in P2.
 
 Lock Case 4 prevents this READ COMMITTED phantom at the coarser granularity of the whole table, so all concurrent writes to \texttt{accounts} are blocked while the lock is held. Its script deliberately omits \texttt{START TRANSACTION}, which implicitly releases table locks: when the statement was added after \texttt{LOCK TABLES}, the \texttt{INSERT} proceeded immediately and the phantom returned.
+
+Lock Cases 5 and 6 isolate the cost of that coarser granularity. Both keep Session 1's two reads of Account 101 consistent, so neither changes \emph{correctness} relative to SERIALIZABLE. They differ in what else they block: the row lock in Case 5 covers only the Account 101 index record, so Session 2's write to Account 102 does not conflict (logging 0.0s lock wait), whereas the table lock in Case 6 blocks every write to \texttt{accounts}, forcing Session 2 to endure a 4.0s collateral wait for a row Session 1 never reads.
+
+\subsubsection{Performance Trade-offs of Lock Granularity}
+The 4.0s waits above are dictated by the \texttt{DO SLEEP} schedule and therefore show \emph{that} a lock blocks, not how much throughput it costs. To quantify the trade-off, a separate benchmark (\texttt{runner/benchmark\_locks.py}) runs $N$ concurrent worker threads, each executing $K$ short transactions that read a row, hold their lock for $h$ seconds of simulated work, and then update the row, all under SERIALIZABLE. Three modes are compared:
+\begin{itemize}
+    \item \textbf{row}: \texttt{SELECT ... FOR UPDATE}, each worker on its own row (disjoint work, fine-grained lock).
+    \item \textbf{row-hot}: \texttt{SELECT ... FOR UPDATE}, all workers on the same row (contended work, fine-grained lock).
+    \item \textbf{table}: \texttt{LOCK TABLES accounts WRITE}, each worker on its own row (disjoint work, coarse lock).
+\end{itemize}
+If locks only serialize conflicting work, the ideal runtime is $K \cdot h$ for \textbf{row} and $N \cdot K \cdot h$ for the other two modes. Table~\ref{tab:lock_bench} reports the measured values.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Lock Granularity Benchmark (SERIALIZABLE, $N=4$, $K=5$, $h=0.2$s)}
+\label{tab:lock_bench}
+\begin{tabularx}{\columnwidth}{l c c c X}
+\toprule
+\textbf{Mode} & \textbf{Ideal} & \textbf{Runtime} & \textbf{txn/s} & \textbf{Avg latency} \\
+\midrule
+row     & 1.00s & 1.18s & 16.93 & 0.22s \\
+row-hot & 4.00s & 4.39s & 4.56  & 0.80s \\
+table   & 4.00s & 4.44s & 4.51  & 0.81s \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The expected pattern is that \textbf{table} performs about as badly as \textbf{row-hot}: an explicit table lock makes four workers with disjoint rows queue up as if they were all contending for a single row, cutting throughput by roughly a factor of $N$ relative to \textbf{row}. Row-level locks recover that concurrency only when the work is actually disjoint and the lookup uses an index; Lock Case 3 showed that a locking read on the unindexed \texttt{balance} column degrades into locking the whole table anyway. The trade-off is therefore not ``row locks are fast, table locks are slow'' but rather that lock scope should match the data a transaction actually depends on: table locks are simple and deadlock-free (all locks are acquired up front) but sacrifice concurrency, whereas row and next-key locks preserve concurrency at the cost of index design discipline and the possibility of deadlocks and \texttt{innodb\_lock\_wait\_timeout} errors~\cite{MySQLLocking}.
+
+%%
+%% --- Insights ---
+%%
+\section{Insights}
+
+\subsection{Isolation Is a Dial, Not a Switch}
+The 12 baseline cases show that no single isolation level is ``correct''; each level removes one more class of anomaly by doing more work per read. READ UNCOMMITTED reads whatever is in the buffer and exposes the \$700.00 balance that was later rolled back. READ COMMITTED pays for a fresh Read View per statement and removes dirty reads, yet still lets a statement job see \$1000.00 and then \$1200.00 within one transaction. REPEATABLE READ keeps one Read View per transaction and, on InnoDB, even hides phantom inserts from plain \texttt{SELECT}s. SERIALIZABLE converts every read into a locking read and is the only level that prevented all three anomalies outright, but it did so by making Session 2 wait 4.0s in every SERIALIZABLE case. The DBMS exposes the isolation level because only the application knows which of these costs is acceptable: a dashboard showing approximate totals can tolerate READ COMMITTED, whereas a funds transfer that reads a balance and then writes based on it cannot.
+
+\subsection{The Standard Is Not the Implementation}
+ANSI SQL-92 defines isolation levels by which phenomena they \emph{permit}, and engines are free to prevent more~\cite{Berenson1995}. InnoDB's REPEATABLE READ prevented the classic phantom in $P_2$, which the standard allows, yet still produced the ``write-only'' phantom in $P_3$, where an \texttt{UPDATE} modified and then revealed Account 104, a row the transaction had never seen. A developer who assumes ``REPEATABLE READ means no phantoms'' on InnoDB would write an audit that flags an account it never listed; a developer who assumes ``REPEATABLE READ allows phantoms'' would add unnecessary locking. Application code therefore has to be validated against the specific engine and version, not only against the textbook isolation matrix.
+
+\subsection{Targeted Locks Beat Blanket Isolation}
+The lock experiments show that an anomaly can be removed for one critical statement without raising the isolation level of the entire session. Lock Case 1 prevented a dirty read at READ UNCOMMITTED, and Lock Case 2 prevented a non-repeatable read at READ COMMITTED, by adding \texttt{FOR UPDATE} or \texttt{FOR SHARE} to a single \texttt{SELECT}. This lets an application run most of its traffic at a cheap level (MySQL's default REPEATABLE READ or the commonly used READ COMMITTED) and pay for locking only on the read-then-write paths that need it, such as checking a balance before a withdrawal. The cost is that correctness now depends on every developer remembering to write the locking read; isolation levels are declarative and enforced by the engine, whereas explicit locks are imperative and easy to omit.
+
+\subsection{Lock Scope Must Match Data Dependencies}
+Lock Case 3 blocked an insert with a balance of \$100.00, outside the audited range, because the unindexed predicate forced InnoDB to lock every row and gap, and the same locking read failed to prevent the phantom at READ COMMITTED, where gap locks are not used. Lock Cases 4 and 6 achieved correctness with table locks but blocked writes to unrelated rows, and the benchmark in Table~\ref{tab:lock_bench} quantifies how that collateral blocking turns disjoint workers into a single queue. Choosing a locking strategy is therefore a schema-design decision as much as a transaction-design decision: indexes determine how much a locking read actually locks, and the isolation level determines whether gap locks exist at all.
+
+\subsection{Impact on Application Development}
+In practice, these findings translate into concrete development rules. First, choose the isolation level per transaction, not per database: \texttt{SET SESSION TRANSACTION ISOLATION LEVEL} or \texttt{SET TRANSACTION} lets a reporting query and a payment run side by side with different guarantees. Second, make transactions short; every SERIALIZABLE and locking case in this study waited exactly as long as the other transaction held its locks, so the \texttt{DO SLEEP} calls stand in for slow application logic, network round-trips, or user think-time inside a transaction. Third, expect and handle lock wait timeouts and deadlocks (MySQL errors 1205 and 1213) with retry logic, since stronger isolation turns silent anomalies into explicit errors. Finally, test concurrency behavior empirically, as this study did with the two-session runner, because the interaction between MVCC snapshots, current reads, and gap locks is subtle enough that reasoning from documentation alone was insufficient to predict the REPEATABLE READ and READ COMMITTED locking results.
 
 %%
 %% --- Appendix ---
@@ -480,23 +633,127 @@ $t = 6.0$s & SELECT 'P3', account\_id $\rightarrow$ \textbf{[101, 103]} (2 rows)
 \end{tabularx}
 \end{table*}
 
+\section{Lock Experiment Execution Timelines}
+Table~\ref{tab:app_lock} gives the two-column interleaved timelines for the six lock experiments, using the same timestamp convention as Appendix A.
+
+\begin{table*}[p]
+\centering
+\small
+\caption{Appendix Table B1: Two-Column Interleaved Timelines for the Explicit Locking Experiments}
+\label{tab:app_lock}
+\begin{tabularx}{\textwidth}{p{1.8cm} X X}
+\toprule
+\textbf{Time ($t_x$)} & \textbf{Session 1} & \textbf{Session 2} \\
+\midrule
+\multicolumn{3}{l}{\textbf{Lock Case 1: READ UNCOMMITTED + \texttt{FOR UPDATE} (Dirty Read) --- Verdict: PREVENTED}} \\
+$t = 0.0$s & START TRANSACTION; UPDATE accounts SET balance = balance - 300.00 WHERE account\_id = 101; [Holds X-Lock] $\rightarrow$ \textbf{700.00}; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding uncommitted update) & START TRANSACTION; SELECT 'R1' ... FOR UPDATE $\rightarrow$ \textbf{BLOCKED} (needs X-Lock); \\
+$t = 6.0$s & ROLLBACK; [Releases X-Lock]; SELECT 'W after rollback' $\rightarrow$ \textbf{1000.00}; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ 'R1' $\rightarrow$ \textbf{1000.00} \textbf{[NO DIRTY READ]}; DO SLEEP(2); \\
+$t = 8.0$s & (transaction finished) & SELECT 'R2' ... FOR UPDATE $\rightarrow$ \textbf{1000.00}; COMMIT; \\
+\midrule
+\multicolumn{3}{l}{\textbf{Lock Case 2: READ COMMITTED + \texttt{FOR SHARE} (Non-Repeatable Read) --- Verdict: PREVENTED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'R1' ... FOR SHARE $\rightarrow$ \textbf{1000.00} [Holds S-Lock]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding S-Lock) & START TRANSACTION; UPDATE accounts SET balance = balance + 200.00 WHERE account\_id = 101 $\rightarrow$ \textbf{BLOCKED}; \\
+$t = 6.0$s & SELECT 'R2' ... FOR SHARE $\rightarrow$ \textbf{1000.00} \textbf{[REPEATABLE]}; COMMIT; [Releases S-Lock]; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ UPDATE completes; COMMIT; SELECT 'W committed' $\rightarrow$ \textbf{1200.00}; \\
+\midrule
+\multicolumn{3}{l}{\textbf{Lock Case 3: REPEATABLE READ + Locking Range Read (Phantom Read) --- Verdict: PREVENTED}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'P1' ... WHERE balance >= 800.00 FOR UPDATE $\rightarrow$ \textbf{[101, 103]} [Next-Key Locks on all rows and gaps]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding Next-Key Locks) & START TRANSACTION; INSERT INTO accounts VALUES (104, 4, 1500.00, 'ACTIVE') $\rightarrow$ \textbf{BLOCKED} (insert-intention vs. gap lock); \\
+$t = 6.0$s & SELECT 'P2' ... FOR UPDATE $\rightarrow$ \textbf{[101, 103]} \textbf{[NO PHANTOM]}; COMMIT; [Releases locks]; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ INSERT completes; COMMIT; \\
+\midrule
+\multicolumn{3}{l}{\textbf{Lock Case 4: READ COMMITTED + \texttt{LOCK TABLES accounts READ} (Phantom Read) --- Verdict: PREVENTED}} \\
+$t = 0.0$s & LOCK TABLES accounts READ; SELECT 'P1' $\rightarrow$ \textbf{[101, 103]}; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding table READ lock) & START TRANSACTION; INSERT INTO accounts VALUES (104, 4, 1500.00, 'ACTIVE') $\rightarrow$ \textbf{BLOCKED} (table lock); \\
+$t = 6.0$s & SELECT 'P2' $\rightarrow$ \textbf{[101, 103]} \textbf{[NO PHANTOM]}; UNLOCK TABLES; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ INSERT completes; COMMIT; \\
+\midrule
+\multicolumn{3}{l}{\textbf{Lock Case 5: SERIALIZABLE + \texttt{FOR UPDATE} on Account 101; S2 writes Account 102 --- Verdict: NO COLLATERAL WAIT}} \\
+$t = 0.0$s & START TRANSACTION; SELECT 'R1' ... FOR UPDATE $\rightarrow$ \textbf{1000.00} [X-Lock on 101 only]; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding X-Lock on 101) & START TRANSACTION; UPDATE accounts SET balance = balance + 50.00 WHERE account\_id = 102 $\rightarrow$ \textbf{Completes Immediately (0.0s wait)}; COMMIT; SELECT 'W committed' $\rightarrow$ \textbf{550.00}; \\
+$t = 6.0$s & SELECT 'R2' ... FOR UPDATE $\rightarrow$ \textbf{1000.00}; COMMIT; & (transaction finished) \\
+\midrule
+\multicolumn{3}{l}{\textbf{Lock Case 6: SERIALIZABLE + \texttt{LOCK TABLES accounts WRITE}; S2 writes Account 102 --- Verdict: COLLATERAL WAIT}} \\
+$t = 0.0$s & LOCK TABLES accounts WRITE; SELECT 'R1' $\rightarrow$ \textbf{1000.00}; DO SLEEP(6); & DO SLEEP(2); \\
+$t = 2.0$s & (holding table WRITE lock) & START TRANSACTION; UPDATE accounts SET balance = balance + 50.00 WHERE account\_id = 102 $\rightarrow$ \textbf{BLOCKED}; \\
+$t = 6.0$s & SELECT 'R2' $\rightarrow$ \textbf{1000.00}; UNLOCK TABLES; & \textbf{UNBLOCKED} (waited 4.0s) $\rightarrow$ UPDATE completes; COMMIT; SELECT 'W committed' $\rightarrow$ \textbf{550.00}; \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
 %%
 %% This local block overrides the missing file error and registers your specific citation keys.
 \begin{thebibliography}{99}
+
+\bibitem{ANSI1992}
+American National Standards Institute. 1992.
+\newblock {\em ANSI X3.135-1992: Information Systems --- Database Language --- SQL}.
+\newblock ANSI, New York, NY.
+
+\bibitem{Berenson1995}
+Hal Berenson, Phil Bernstein, Jim Gray, Jim Melton, Elizabeth O'Neil, and Patrick O'Neil. 1995.
+\newblock A Critique of ANSI SQL Isolation Levels.
+\newblock In {\em Proceedings of the 1995 ACM SIGMOD International Conference on Management of Data}. 1--10.
+\newblock \url{https://doi.org/10.1145/223784.223785}
+
+\bibitem{GrayReuter1992}
+Jim Gray and Andreas Reuter. 1992.
+\newblock {\em Transaction Processing: Concepts and Techniques}.
+\newblock Morgan Kaufmann.
 
 \bibitem{Silberschatz2020}
 Abraham Silberschatz, Henry F. Korth, and S. Sudarshan. 2020.
 \newblock {\em Database System Concepts} (7th ed.).
 \newblock McGraw-Hill.
 
-\bibitem{RDTArchive2025}
-Sakila Database Reference Archive. 2025.
-\newblock MySQL Documentation Team.
+\bibitem{MySQLIsolation}
+Oracle Corporation. 2025.
+\newblock Transaction Isolation Levels. In {\em MySQL 9.4 Reference Manual}.
+\newblock \url{https://dev.mysql.com/doc/refman/9.4/en/innodb-transaction-isolation-levels.html}
 
-\bibitem{Selinger1979}
-Patricia G. Selinger, et al. 1979.
-\newblock Access Path Selection in a Relational Database Management System.
-\newblock In {\em Proceedings of the 1979 ACM SIGMOD International Conference on Management of Data}. 23--34.
+\bibitem{MySQLConsistentRead}
+Oracle Corporation. 2025.
+\newblock Consistent Nonlocking Reads. In {\em MySQL 9.4 Reference Manual}.
+\newblock \url{https://dev.mysql.com/doc/refman/9.4/en/innodb-consistent-read.html}
+
+\bibitem{MySQLLockingReads}
+Oracle Corporation. 2025.
+\newblock Locking Reads. In {\em MySQL 9.4 Reference Manual}.
+\newblock \url{https://dev.mysql.com/doc/refman/9.4/en/innodb-locking-reads.html}
+
+\bibitem{MySQLLocking}
+Oracle Corporation. 2025.
+\newblock InnoDB Locking. In {\em MySQL 9.4 Reference Manual}.
+\newblock \url{https://dev.mysql.com/doc/refman/9.4/en/innodb-locking.html}
+
+\bibitem{MySQLNextKey}
+Oracle Corporation. 2025.
+\newblock Phantom Rows. In {\em MySQL 9.4 Reference Manual}.
+\newblock \url{https://dev.mysql.com/doc/refman/9.4/en/innodb-next-key-locking.html}
+
+\bibitem{MySQLLockTables}
+Oracle Corporation. 2025.
+\newblock LOCK TABLES and UNLOCK TABLES Statements. In {\em MySQL 9.4 Reference Manual}.
+\newblock \url{https://dev.mysql.com/doc/refman/9.4/en/lock-tables.html}
+
+\bibitem{Sakila}
+Oracle Corporation. 2025.
+\newblock {\em Sakila Sample Database}.
+\newblock \url{https://dev.mysql.com/doc/sakila/en/}
+
+\bibitem{PythonThreading}
+Python Software Foundation. 2025.
+\newblock threading --- Thread-based parallelism. In {\em The Python Standard Library}.
+\newblock \url{https://docs.python.org/3/library/threading.html}
+
+\bibitem{PyMySQL}
+PyMySQL Contributors. 2025.
+\newblock {\em PyMySQL: Pure Python MySQL Client}.
+\newblock \url{https://github.com/PyMySQL/PyMySQL}
+
+%% TODO: fill in the actual course code, instructor, and slide-deck title(s) used in class.
+\bibitem{LectureNotes}
+De La Salle University, College of Computer Studies. 2026.
+\newblock STADVDB Lecture Notes: Transaction Management, Concurrency Control, and Isolation Levels.
+\newblock Course lecture slides.
 
 \end{thebibliography}
 

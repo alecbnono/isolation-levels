@@ -4,14 +4,17 @@
 1. Run `sql/setup/00_schema.sql` (creates database `stadvdb_ho3`; Sakila is NOT required), then `sql/setup/01_seed.sql`.
 2. Install [uv](https://docs.astral.sh/uv/). The runner declares its own deps (pymysql) inline, so no venv/pip step.
 
-## Automated run (all 12 cases)
-    ./runner/run_cases.py --password <pw>
+## Automated run (12 baseline + 6 lock cases)
+    ./runner/run_cases.py --password <pw>                    # all 18 cases
+    ./runner/run_cases.py --password <pw> --mode baseline    # 12 baseline cases -> results/summary.md
+    ./runner/run_cases.py --password <pw> --mode locks       # 6 lock cases      -> results/lock_summary.md
     ./runner/run_cases.py --password <pw> --case phantom --level RR
+    ./runner/benchmark_locks.py --password <pw>              # lock-granularity benchmark -> results/lock_benchmark.md
     # equivalent: uv run runner/run_cases.py --password <pw>
     # or set MYSQL_PASSWORD=<pw> once and drop --password
 
-Writes `logs/<case>_<level>.log` (timestamped evidence) and `results/summary.md`.
-Levels: RU, RC, RR, SER. Cases: dirty, nonrepeatable, phantom.
+Writes `logs/<case>_<level>.log` (timestamped evidence), `results/summary.md`, and `results/lock_summary.md`.
+Levels: RU, RC, RR, SER. Cases: dirty, nonrepeatable, phantom, lock1..lock6.
 
 ## Manual run (Workbench / two terminals)
 1. Run `sql/setup/02_reset.sql` then `01_seed.sql`.
