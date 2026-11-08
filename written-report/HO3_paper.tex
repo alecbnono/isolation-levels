@@ -502,6 +502,34 @@ Lock Case 3 blocked an insert with a balance of \$100.00, outside the audited ra
 In practice, these findings translate into concrete development rules. First, choose the isolation level per transaction, not per database: \texttt{SET SESSION TRANSACTION ISOLATION LEVEL} or \texttt{SET TRANSACTION} lets a reporting query and a payment run side by side with different guarantees. Second, make transactions short; every SERIALIZABLE and locking case in this study waited exactly as long as the other transaction held its locks, so the \texttt{DO SLEEP} calls stand in for slow application logic, network round-trips, or user think-time inside a transaction. Third, expect and handle lock wait timeouts and deadlocks (MySQL errors 1205 and 1213) with retry logic, since stronger isolation turns silent anomalies into explicit errors. Finally, test concurrency behavior empirically, as this study did with the two-session runner, because the interaction between MVCC snapshots, current reads, and gap locks is subtle enough that reasoning from documentation alone was insufficient to predict the REPEATABLE READ and READ COMMITTED locking results.
 
 %%
+%% --- Record of Contribution ---
+%%
+\section{Record of Contribution}
+In accordance with the guidelines for this activity, Table~\ref{tab:contribution} declares the individual contributions and sub-deliverables completed by each group member across all phases of the project.
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Record of Group Member Contributions}
+\label{tab:contribution}
+\begin{tabularx}{\textwidth}{p{3.8cm} p{3.8cm} X}
+\toprule
+\textbf{Role / Phase} & \textbf{Claimed by} & \textbf{Task Breakdown \& Sub-deliverables} \\
+\midrule
+1. Schema \& Scenario Design & Airon Matthew Bantillo & Designed relational schema (\texttt{customer}, \texttt{accounts}, \texttt{transactions}), defined initial baseline data seeds, formulated the 3 concurrency anomaly scenarios (Dirty Read, Non-Repeatable Read, and Phantom Read), and created initial transaction timing diagrams. \\
+\midrule
+2. DB Setup \& Transaction Scripts & Bullet Andre Fernandez & Created automated DDL/DML setup and reset scripts (\texttt{00\_schema.sql}, \texttt{01\_seed.sql}, \texttt{02\_reset.sql}), implemented dual-session SQL transaction script pairs with controlled timing (\texttt{DO SLEEP} offsets) for all test cases. \\
+\midrule
+3. Baseline Isolation Experiments & Jean Rondel Ponce & Executed and validated all 12 baseline matrix test cases across the 4 ANSI SQL-92 isolation levels (\textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, \textbf{SERIALIZABLE}) against MySQL InnoDB, captured timestamped event logs, and documented observed read anomalies. \\
+\midrule
+4. Lock Experiments \& Performance & Charles Sebastian Infante & Implemented and executed explicit locking mechanisms (\texttt{FOR UPDATE}, \texttt{FOR SHARE}, and \texttt{LOCK TABLES}), recorded lock blocking metrics, developed the concurrency benchmarking suite, and measured throughput and latency trade-offs. \\
+\midrule
+5. Results, Report \& Presentation & Alec Marx Gabriel Nono & Synthesized isolation level comparison matrices and timelines, compiled and formatted the technical report (\LaTeX), drafted presentation materials, and coordinated live defense preparation. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+%%
 %% --- Appendix ---
 %%
 \appendix
