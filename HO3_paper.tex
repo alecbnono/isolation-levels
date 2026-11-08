@@ -1,0 +1,162 @@
+%%
+%% Technical Paper Template for CCS
+%%
+%% Adapted from SIGCONF Proceedings template
+%%
+
+\documentclass[sigconf, pbalance, nonacm]{acmart}
+\usepackage{tikz}
+\usepackage{listings}
+\usepackage{xcolor} 
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    \normalfont{B}\kern-0.5em{\scshape i\kern-0.25em b}\kern-0.8em\TeX}}}
+
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission{}
+\pagestyle{plain}
+
+%%
+%% To avoid column breaking
+\lstset{
+  basicstyle=\ttfamily\small, 
+  breaklines=true,            
+  breakatwhitespace=true,     
+  columns=fullflexible,       
+  keepspaces=true,             
+  showstringspaces=false,     
+  frame=single,               
+  commentstyle=\color{gray},   
+  keywordstyle=\color{blue}  
+}
+
+%% %% %% %% %%
+%% Start of the actual paper.
+\begin{document}
+
+%%
+%% Paper title.
+\title{Isolation levels for Sakila Dataset}
+
+%%
+%% Authors
+\author{Airon Matthew Bantillo}
+\email{airon\_bantillo@dlsu.edu.ph}
+\affiliation{%
+  \institution{De La Salle University}
+  \city{Manila}
+  \country{Philippines}
+}
+
+\author{Bullet Andre Fernandez}
+\email{bullet\_fernandez@dlsu.edu.ph}
+\affiliation{%
+  \institution{De La Salle University}
+  \city{Manila}
+  \country{Philippines}
+}
+
+\author{Charles Sebastian V. Infante}
+\email{charles\_infante@dlsu.edu.ph}
+\affiliation{%
+  \institution{De La Salle University}
+  \city{Manila}
+  \country{Philippines}
+}
+
+\author{Alec Marx G. Nono}
+\email{alec\_nono@dlsu.edu.ph}
+\affiliation{%
+  \institution{De La Salle University}
+  \city{Manila}
+  \country{Philippines}
+}
+
+\author{Jean Rondel Ponce}
+\email{jean\_ponce@dlsu.edu.ph}
+\affiliation{%
+  \institution{De La Salle University}
+  \city{Manila}
+  \country{Philippines}
+}
+
+\renewcommand{\shortauthors}{Fernandez et al.}
+
+%%
+%% This command processes the author and affiliation and title information and builds the first part of the formatted document.
+\maketitle
+%%
+%%
+%% --- Introduction ---
+%%
+\section{Introduction}
+
+Modern relational database management systems (RDBMS) rely on concurrency controls to enable the simultaneous execution of multiple transactions while ensuring data integrity. ANSI's SQL-92 standards define four transaction isolation levels to balance data consistency and control a system's susceptibility to the following three read anomalies: \textbf{Dirty Reads}, \textbf{Non-Repeatable Reads}, and \textbf{Phantom Reads}. 
+
+This study evaluates the operation behavior of MySQL's \textbf{InnoDB} storage engine under concurrent workload execution. A multi-session testing environment was constructed to observe Multi-Version Concurrency Control behavior across all four isolation levels: \textbf{READ UNCOMMITTED}, \textbf{READ COMMITTED}, \textbf{REPEATABLE READ}, and \textbf{SERIALIZABLE}. 
+
+\subsection {Relational Schema Design}
+The experimental domain models MySQL's Sakila database. The relational tables are defined with explicit foreign key constraints and transactional support powered by the \textbf{InnoDB} engine. 
+
+The schema definition for the tracking tables is implemented as follows:
+
+\begin{lstlisting}[language=SQL, caption={DDL Schema Definition for Accounts and Transactions}]
+CREATE TABLE IF NOT EXISTS accounts (
+    account_id INT PRIMARY KEY AUTO_INCREMENT,
+    customer_id INT NOT NULL,
+    balance DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS transactions (
+    transaction_id INT PRIMARY KEY AUTO_INCREMENT,
+    account_id INT NOT NULL,
+    type VARCHAR(20) NOT NULL, -- 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER'
+    amount DECIMAL(10, 2) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id)
+) ENGINE=InnoDB;
+\end{lstlisting}
+
+\subsection{Initial Seed Data}
+The environment was initialized with three core account entities to provide baseline states for concurrent query execution: 
+
+\begin{lstlisting}[language=SQL, caption={DML Initial Data Seeding}]
+INSERT INTO accounts (account_id, customer_id, balance, status) VALUES
+(101, 1, 1000.00, 'ACTIVE'),
+(102, 2, 500.00,  'ACTIVE'),
+(103, 3, 2500.00, 'ACTIVE');
+
+INSERT INTO transactions (account_id, type, amount) VALUES
+(101, 'DEPOSIT', 1000.00),
+(102, 'DEPOSIT', 500.00),
+(103, 'DEPOSIT', 2500.00);
+\end{lstlisting}
+
+\section{Experiments}
+
+
+%%
+%% This local block overrides the missing file error and registers your specific citation keys.
+\begin{thebibliography}{99}
+
+\bibitem{Silberschatz2020}
+Abraham Silberschatz, Henry F. Korth, and S. Sudarshan. 2020.
+\newblock {\em Database System Concepts} (7th ed.).
+\newblock McGraw-Hill.
+
+\bibitem{RDTArchive2025}
+Sakila Database Reference Archive. 2025.
+\newblock MySQL Documentation Team.
+
+\bibitem{Selinger1979}
+Patricia G. Selinger, et al. 1979.
+\newblock Access Path Selection in a Relational Database Management System.
+\newblock In {\em Proceedings of the 1979 ACM SIGMOD International Conference on Management of Data}. 23--34.
+
+\end{thebibliography}
+
+\end{document}
