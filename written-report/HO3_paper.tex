@@ -289,6 +289,13 @@ In contrast, REPEATABLE READ establishes a single, transaction-level Read View u
 Even if Session 2 commits changes concurrently, Session 1's subsequent read traverses the undo log history
 to reconstruct the committed pre-image of \$1000.00, successfully preserving read repeatability.
 
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{assets/dirty_read_manual.png}
+  \caption{Manual validation of Dirty Read in MySQL Workbench under READ UNCOMMITTED: Result 1 ($R_1$) displays uncommitted balance (700.00)}
+  \label{fig:dirty_read_manual}
+\end{figure}
+
 \subsubsection{The Phantom Phenomenon under REPEATABLE READ}
 The ``Write-Only Phantom'' under REPEATABLE READ highlights a distinction between InnoDB's MVCC Snapshot Reads and Current Reads. 
 According to ANSI SQL-92's specifications, REPEATABLE READ permits phantom rows on re-queries. 
@@ -308,7 +315,6 @@ When Session 2 issues a read at $t=2.0$s requesting an S-lock, InnoDB blocks the
 Under Strict 2PL, Session 1 only enters its Shrinking Phase upon issuing \texttt{ROLLBACK} at $t=6.0$s, releasing all acquired locks. 
 Session 2 is immediately granted the S-lock, logging an exact lock wait duration of 4.0s ($6.0\text{s} - 2.0\text{s}$). 
 An identical 4.0s block occurs in Case 8, where Session 1's S-lock blocks Session 2's X-lock update until Session 1 commits.
-emonstrating the classic phantom anomaly in READ UNCOMMITTED and READ COMMITTED, the snapshot hiding and write-only phantom manifestation in REPEATABLE READ, and index gap lock prevention in SERIALIZABLE.
 
 \subsection{Explicit Locking Experiments Framework (Member 4)}
 To evaluate lock-based concurrency control as an alternative to elevating entire transaction isolation levels, four explicit locking configurations were tested using row-level locks:
